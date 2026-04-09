@@ -1,0 +1,22 @@
+[workspace]
+members = [
+    "crates/hmanga-app",
+    "crates/hmanga-core",
+    "crates/hmanga-host",
+    "crates/hmanga-plugin-jm",
+    "plugin-sdk/hmanga-plugin-macro",
+    "plugin-sdk/hmanga-plugin-sdk",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+hmanga-core = { path = "crates/hmanga-core" }
+hmanga-host = { path = "crates/hmanga-host" }
+hmanga-plugin-jm = { path = "crates/hmanga-plugin-jm" }
+hmanga-plugin-macro = { path = "plugin-sdk/hmanga-plugin-macro" }
+hmanga-plugin-sdk = { path = "plugin-sdk/hmanga-plugin-sdk" }
