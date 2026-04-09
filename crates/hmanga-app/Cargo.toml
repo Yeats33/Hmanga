@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+bundle = []
+
 [[bin]]
 name = "hmanga-app"
 path = "src/main.rs"

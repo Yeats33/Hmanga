@@ -1,0 +1,12 @@
+[application]
+name = "Hmanga"
+sub_package = "hmanga-app"
+asset_dir = "public"
+out_dir = "dist"
+
+[bundle]
+identifier = "com.yeats.hmanga"
+publisher = "Yeats33"
+copyright = "Copyright (c) Yeats33 and contributors"
+short_description = "A desktop manga browser, downloader, and local shelf app."
+long_description = "Hmanga is a Dioxus desktop app for browsing supported manga sources, downloading chapters, managing a local shelf, and reading content locally."

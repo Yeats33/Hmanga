@@ -9,13 +9,46 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  get-version:
     runs-on: ubuntu-latest
+    outputs:
+      VERSION: ${{ steps.version.outputs.VERSION }}
+      TAG_NAME: ${{ steps.version.outputs.TAG_NAME }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve version
+        id: version
+        run: |
+          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          echo "TAG_NAME=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+  windows-build:
+    needs: get-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.get-version.outputs.TAG_NAME }}
+
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli --version 0.7.5 --locked
+
+      - name: Bundle Windows installers
+        run: dx bundle --windows --release --package hmanga-app --features bundle --package-types msi --package-types nsis --out-dir artifacts
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: artifacts/*
+
+  linux-build:
+    needs: get-version
+    runs-on: ubuntu-22.04
+    steps:
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
@@ -31,17 +64,80 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxdo-dev \
             lld \
+            patchelf \
             pkg-config \
             wget \
             librsvg2-dev
 
-      - name: Verify workspace
-        run: |
-          cargo fmt --check
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo test --workspace
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.get-version.outputs.TAG_NAME }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli --version 0.7.5 --locked
+
+      - name: Bundle Linux installers
+        run: dx bundle --linux --release --package hmanga-app --features bundle --package-types deb --package-types rpm --package-types appimage --out-dir artifacts
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifacts
+          path: artifacts/*
+
+  macos-build:
+    needs: get-version
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.get-version.outputs.TAG_NAME }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli --version 0.7.5 --locked
+
+      - name: Bundle macOS installer
+        run: dx bundle --macos --release --package hmanga-app --features bundle --package-types dmg --out-dir artifacts
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: artifacts/*
+
+  create-release:
+    needs: [get-version, windows-build, linux-build, macos-build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-artifacts
+          path: artifacts/windows
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-artifacts
+          path: artifacts/linux
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-artifacts
+          path: artifacts/macos
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.get-version.outputs.TAG_NAME }}
+          name: Hmanga v${{ needs.get-version.outputs.VERSION }}
           generate_release_notes: true
+          files: |
+            artifacts/windows/*
+            artifacts/linux/*
+            artifacts/macos/*

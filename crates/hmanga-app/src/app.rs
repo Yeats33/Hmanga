@@ -757,7 +757,7 @@ pub fn App() -> Element {
                     }
                     div {
                         style: "display:flex; flex-wrap:wrap; gap:10px 16px; margin-top:10px; font-size:11px; line-height:1.6; color:#8a8477;",
-                        span { "Hmanga v0.1.0" }
+                        span { "Hmanga v0.1.2" }
                         span { "仅供学习、研究与个人归档使用" }
                         span { "本项目与 JM / 18comic 及相关版权方无官方关联" }
                         span { "漫画、封面与站点内容版权归原作者及权利人所有" }
