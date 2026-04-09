@@ -9,3 +9,12 @@ path = "src/lib.rs"
 
 [dependencies]
 hmanga-core.workspace = true
+aes = "0.8"
+base64 = "0.22"
+image = "0.25"
+md5 = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
