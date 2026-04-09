@@ -28,3 +28,6 @@ thiserror = "1"
 wasmtime = "21"
 tempfile = "3"
 zip = "2"
+dioxus = { version = "0.7", features = ["desktop", "launch", "router"] }
+dioxus-router = "0.7"
+dioxus-core = "0.7"

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Hmanga is an open-source, cross-platform manga downloader with a unified UI and a plugin system for multiple sites. Built entirely in Rust using Dioxus for the GUI. Monetization is through a donation-to-unlock model (honor system).
+Hmanga is an open-source manga downloader with a unified UI and a plugin system for multiple sites. Built entirely in Rust using Dioxus for the GUI. Monetization is through a donation-to-unlock model (honor system). V1 targets desktop only.
 
 ## Business Model
 
@@ -13,9 +13,9 @@ Hmanga is an open-source, cross-platform manga downloader with a unified UI and 
 ## Tech Stack
 
 - **Language**: Rust (entire project)
-- **GUI**: Dioxus (desktop target, experimental Android)
-- **WASM Runtime**: wasmtime (for third-party plugins)
-- **Serialization**: serde + MessagePack (WASM boundary), serde_json (config/responses)
+- **GUI**: Dioxus (desktop target for v1)
+- **Plugin Loading**: libloading (official installable native plugins), wasmtime (third-party WASM plugins)
+- **Serialization**: serde + MessagePack (plugin boundary), serde_json (config/responses)
 - **HTTP**: reqwest + reqwest-middleware (retry)
 - **Async**: tokio
 - **Image**: image crate
@@ -33,11 +33,11 @@ Hmanga is an open-source, cross-platform manga downloader with a unified UI and 
 hmanga/
 ├── crates/
 │   ├── hmanga-core/          # Core: plugin traits, data models, download engine
-│   ├── hmanga-host/          # WASM host runtime (wasmtime), loads third-party plugins
+│   ├── hmanga-host/          # External plugin loader/runtime (official native packages + third-party WASM)
 │   ├── hmanga-plugin-jm/     # JM official plugin (FullPlugin)
 │   └── hmanga-app/           # Dioxus desktop app (UI + glue)
 ├── plugin-sdk/
-│   ├── hmanga-plugin-sdk/    # Plugin SDK crate (third-party devs import this)
+│   ├── hmanga-plugin-sdk/    # Plugin SDK crate (external plugin authors import this)
 │   └── examples/             # Example plugins
 └── docs/
     └── plugin-guide/         # Plugin development documentation
@@ -50,8 +50,9 @@ User action (Dioxus UI)
     ↓
 hmanga-app (routes to correct plugin)
     ↓
-├─ Official plugins: direct Rust function calls, zero overhead
-└─ Custom plugins: via hmanga-host WASM runtime
+├─ Bundled official plugins: direct Rust function calls
+├─ Installable official plugins: native plugin packages via hmanga-host
+└─ Third-party plugins: WASM packages via hmanga-host
     ↓
 hmanga-core (download engine, concurrency, export)
     ↓
@@ -60,9 +61,11 @@ Filesystem / UI event feedback
 
 ### Key Decisions
 
-- Official plugins are normal Rust crates, compiled into the binary, no WASM overhead
-- Third-party plugins compile to `.wasm`, loaded via wasmtime with sandbox isolation
-- Both implement the same trait, transparent to the UI layer
+- `JM` is the single bundled official plugin in v1 and is compiled into the app binary
+- Additional official plugins are maintained in-repo via PRs, but shipped as installable native plugin packages to avoid bloating the main app bundle
+- Third-party plugins default to `.wasm`, loaded via wasmtime with sandbox isolation
+- The runtime model reserves a native external-plugin lane, but third-party native plugins are not a public v1 feature
+- All plugin variants adapt to the same host-facing trait, transparent to the UI layer
 - `plugin-sdk` lives in the repo, third-party devs use git dependency:
   ```toml
   [dependencies]
@@ -70,6 +73,15 @@ Filesystem / UI event feedback
   ```
 
 ## Plugin System
+
+### Distribution and Runtime Matrix
+
+| Plugin kind | Maintained by | Packaging | Runtime | V1 policy |
+|-------------|---------------|-----------|---------|-----------|
+| Official bundled | project | inside app binary | native/in-process | supported (`JM`) |
+| Official installable | project via PR | external plugin package | native dynamic library | supported after local unlock |
+| Third-party | external authors | external plugin package | WASM | supported after local unlock |
+| Third-party native | external authors | external plugin package | native dynamic library | architecture reserved, not user-facing in v1 |
 
 ### Layered Trait Design
 
@@ -90,6 +102,17 @@ pub struct PluginMetaInfo {
     pub icon: Vec<u8>,        // PNG, 64x64 to 128x128, max 1 MB
     pub description: String,
     pub capabilities: Capabilities,
+}
+
+pub enum PluginKind {
+    OfficialBundled,
+    OfficialInstallable,
+    ThirdParty,
+}
+
+pub enum PluginRuntimeKind {
+    Native,
+    Wasm,
 }
 
 pub struct Capabilities {
@@ -267,6 +290,22 @@ pub enum LogLevel { Debug, Info, Warn, Error }
 
 pub type TaskId = u64;
 pub type SiteId = String;  // same as plugin id
+
+pub struct PluginInfo {
+    pub meta: PluginMetaInfo,
+    pub kind: PluginKind,
+    pub runtime: PluginRuntimeKind,
+    pub installed: bool,
+    pub unlocked: bool,
+    pub enabled: bool,
+    pub health: PluginHealth,
+}
+
+pub enum PluginHealth {
+    Healthy,
+    Disabled,
+    LoadError(String),
+}
 ```
 
 ### PluginRegistry — Unified Dispatch
@@ -410,12 +449,25 @@ impl SimplePlugin for MySitePlugin {
 Compile with: `cargo build --target wasm32-wasip1 --release` (requires Rust >= 1.78)
 Requires wasmtime >= 15.0 with WASI Preview 1.
 Output: `target/wasm32-wasip1/release/my_site_plugin.wasm`
-Install: copy to `~/.hmanga/plugins/`
+Install: copy to `~/.hmanga/plugins/community/`
+
+### Native Plugin Package Runtime
+
+Official installable plugins are distributed as platform-specific native plugin packages.
+
+- Package contents:
+  - dynamic library: `.dll` / `.so` / `.dylib`
+  - `manifest.json` with plugin metadata, runtime kind, supported host ABI version, and display assets
+- Load path: `~/.hmanga/plugins/official/<plugin-id>/`
+- Loader: `hmanga-host` uses `libloading` and a stable C ABI boundary, then adapts loaded exports into `PluginAdapter`
+- ABI rule: do not expose Rust trait objects directly across the dynamic library boundary
+- Performance goal: official installable plugins should be near bundled-plugin performance because they run natively in-process
+- V1 scope: only official native plugin packages use this lane
 
 ### Plugin Compatibility
 
 - `PluginMetaInfo.sdk_version` is a monotonically increasing integer (starting at 1)
-- At load time, the host checks `sdk_version` against its supported range
+- At load time, the host checks `sdk_version` against its supported range for WASM plugins and checks a matching host ABI version for native plugin packages
 - If the plugin's `sdk_version` is too new (host doesn't support it), the plugin is rejected with a clear error message prompting the user to update the app
 - Breaking ABI changes increment `sdk_version`; additive changes (new optional exports) do not
 
@@ -424,18 +476,25 @@ Install: copy to `~/.hmanga/plugins/`
 ```
 App startup
     ↓
-1. Register all official plugins (compiled-in, direct Rust)
+1. Register bundled official plugins (compiled-in, direct Rust; `JM` in v1)
     ↓
-2. Check is_donated
-    ├─ false: activate only default free plugin (JM), others show 🔒
+2. Read local plugin package directories
+    ├─ `~/.hmanga/plugins/official/` for official installable native packages
+    └─ `~/.hmanga/plugins/community/` for third-party WASM packages
+    ↓
+3. Check `donation_unlocked`
+    ├─ false: activate only default free plugin (`JM`), others show 🔒 with "已捐献？点击解锁" prompt
     └─ true:
-        ├─ Activate all official plugins
-        └─ Scan ~/.hmanga/plugins/*.wasm
+        ├─ Activate bundled official plugins
+        ├─ Load installed official native packages
+        │   ├─ For each package: read manifest → validate ABI → `libloading` load → register
+        │   └─ Fail: log warning, mark plugin errored
+        └─ Scan third-party WASM packages
             ├─ For each .wasm: wasmtime load → validate exports → read PluginMeta
             ├─ Pass: register to PluginRegistry
-            └─ Fail: log warning, skip
+            └─ Fail: log warning, mark plugin errored
     ↓
-3. PluginRegistry ready, UI renders sidebar based on registered plugins
+4. PluginRegistry ready, UI renders sidebar based on bundled plugins plus discovered installable plugins
 ```
 
 ## UI Layout
@@ -578,7 +637,7 @@ pub struct AppState {
     pub download_speed: Signal<u64>,
     pub sessions: Signal<HashMap<String, Session>>,
     pub config: Signal<AppConfig>,
-    pub is_donated: Signal<bool>,
+    pub donation_unlocked: Signal<bool>,
 }
 ```
 
@@ -599,7 +658,7 @@ All data stored as flat JSON files under `~/.hmanga/`:
 
 ```
 ~/.hmanga/
-├── config.json              # App config (download dir, concurrency, proxy, donate code, theme)
+├── config.json              # App config (download dir, concurrency, proxy, donation unlock flag, theme)
 ├── sessions.json            # Login sessions per site { "jm": { token, username, ... } }
 ├── download_history.json    # Completed + in-progress downloads (resumable on restart)
 ├── reading_progress.json    # { "jm:comic_id:chapter_id": { page: 5, timestamp: ... } }
@@ -646,27 +705,18 @@ WASM sandbox boundaries for third-party plugins:
 ### Mechanism
 
 - Donor pays via any channel (WeChat/Alipay/Aifadian)
-- Receives a donation code (UUID-like, generated offline)
-- Enters code in Settings → stored in `~/.hmanga/config.json`
-- Local format validation only, no online verification, no device binding, no expiry
+- Settings displays locked plugins and a "我已捐献，解锁插件" confirmation action
+- User manually confirms they have donated → unlock flag is stored in `~/.hmanga/config.json`
+- No code entry, no online verification, no device binding, no expiry
 
 ### Verification
 
-Intentionally minimal — any well-formatted code is accepted. The `generate_code` function is a separate CLI tool for record-keeping only (tracking which codes were issued to whom). The app does not verify that a code was actually generated by us.
+Intentionally minimal — the app trusts the user's local confirmation. There is no app-side donation verification of any kind. Any maintainer-side donor tracking is out-of-band and not part of the shipped app.
 
 ```rust
-/// Used by the maintainer's CLI tool to generate codes for donors.
-/// NOT shipped in the app binary — lives in a separate `tools/` crate.
-pub fn generate_code(user_id: &str) -> String {
-    let hash = md5::compute(format!("hmanga-{user_id}"));
-    format!("HM-{:X}", hash)
-}
-
-/// App-side: accepts any well-formatted code. Honor system.
-pub fn verify_code(code: &str) -> bool {
-    code.starts_with("HM-")
-        && code.len() == 35
-        && code[3..].chars().all(|c| c.is_ascii_hexdigit())
+/// App-side: purely local honor-system unlock.
+pub fn unlock_plugins_by_confirmation(config: &mut AppConfig) {
+    config.donation_unlocked = true;
 }
 ```
 
@@ -675,7 +725,7 @@ pub fn verify_code(code: &str) -> bool {
 ```json
 {
   "version": 1,
-  "donate_code": "HM-A1B2C3D4E5F6...",
+  "donation_unlocked": false,
   "download_dir": "/Users/xxx/Comics",
   "chapter_concurrency": 3,
   "image_concurrency": 5,

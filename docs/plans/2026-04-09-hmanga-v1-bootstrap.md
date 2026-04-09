@@ -566,3 +566,9 @@ Commit with a Lore message documenting the verified desktop-only release baselin
 - Cross-site deduplication in aggregate search
 - Ranking/weekly/tags for non-JM plugins
 - Rich reader modes beyond a basic desktop shell
+
+# Reference Projects
+
+- [Yeats33/jmcomic-downloader](https://github.com/Yeats33/jmcomic-downloader) — Primary reference 
+- [lanyeeee/wnacg-downloader](https://github.com/lanyeeee/wnacg-downloader) — Reference for architecture patterns
+- [lanyeeee/copymanga-downloader](https://github.com/lanyeeee/copymanga-downloader) — Reference for architecture patterns

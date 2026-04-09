@@ -7,3 +7,18 @@ license.workspace = true
 [[bin]]
 name = "hmanga-app"
 path = "src/main.rs"
+
+[dependencies]
+hmanga-core.workspace = true
+hmanga-host.workspace = true
+hmanga-plugin-jm.workspace = true
+dioxus.workspace = true
+dioxus-core.workspace = true
+dioxus-router.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile.workspace = true
