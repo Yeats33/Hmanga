@@ -2369,7 +2369,7 @@ dependencies = [
 
 [[package]]
 name = "hmanga-app"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "dioxus",
@@ -2386,7 +2386,7 @@ dependencies = [
 
 [[package]]
 name = "hmanga-core"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "rmp-serde",
  "serde",
@@ -2398,7 +2398,7 @@ dependencies = [
 
 [[package]]
 name = "hmanga-host"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "hmanga-core",
  "hmanga-plugin-sdk",
@@ -2413,7 +2413,7 @@ dependencies = [
 
 [[package]]
 name = "hmanga-plugin-jm"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -2427,11 +2427,11 @@ dependencies = [
 
 [[package]]
 name = "hmanga-plugin-macro"
-version = "0.1.0"
+version = "0.1.2"
 
 [[package]]
 name = "hmanga-plugin-sdk"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "hmanga-core",
  "hmanga-plugin-macro",
