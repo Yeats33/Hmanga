@@ -87,7 +87,7 @@ pub struct PluginMetaInfo {
     pub name: String,         // "禁漫天堂"
     pub version: String,      // "0.1.0"
     pub sdk_version: u32,     // SDK ABI version for compatibility check
-    pub icon: Vec<u8>,        // PNG bytes
+    pub icon: Vec<u8>,        // PNG, 64x64 to 128x128, max 1 MB
     pub description: String,
     pub capabilities: Capabilities,
 }
@@ -302,9 +302,20 @@ impl<P: SimplePlugin> PluginAdapter for SimplePluginAdapter<P> {
         let resp = self.execute_http(req).await?;
         self.plugin.parse_search_response(&resp.body)
     }
-    // ... same pattern for all methods: build_request → execute → parse_response
+    // Same pattern for all methods: build_request → execute → parse_response.
+    // For optional capabilities (login, favorites, etc.):
+    // if build_*_request returns None → return Err(PluginError::NotSupported)
+    async fn login(&self, username: &str, password: &str) -> PluginResult<Session> {
+        let Some(req) = self.plugin.build_login_request(username, password) else {
+            return Err(PluginError::NotSupported);
+        };
+        let resp = self.execute_http(req).await?;
+        self.plugin.parse_login_response(&resp.body)
+    }
 }
 ```
+
+Note: Async trait methods use the `async-trait` crate to enable `Box<dyn PluginAdapter>` usage with dynamic dispatch.
 
 ### WASM ABI and Plugin Runtime
 
@@ -332,13 +343,25 @@ Imports (host functions):               Provides these to the guest:
   host_alloc(len) -> ptr                  guest memory allocation helper
 ```
 
+**Return convention**: All guest exports return a single `i64` where the upper 32 bits encode the pointer and the lower 32 bits encode the length. The `#[hmanga_plugin]` proc macro handles this packing automatically. Example: `(ptr=0x1000, len=256)` → `0x0000100000000100i64`.
+
 **Data flow across WASM boundary**:
 1. Host serializes input to MessagePack bytes
-2. Host writes bytes into guest memory (via `host_alloc`)
-3. Host calls guest export with (ptr, len)
-4. Guest deserializes, processes, serializes result to MessagePack
-5. Guest returns (ptr, len) pointing to result in guest memory
-6. Host reads and deserializes the result
+2. Host calls guest's `hm_alloc(len)` export to allocate space in guest memory
+3. Host writes the serialized bytes into that guest memory
+4. Host calls guest export with (ptr, len) → receives packed `i64` result
+5. Host unpacks (result_ptr, result_len) from the `i64`
+6. Host reads and deserializes the result bytes from guest memory
+7. Host calls guest's `hm_dealloc(result_ptr, result_len)` to free the result buffer
+8. Guest is responsible for freeing the input buffer after deserializing (the proc macro handles this)
+
+**Memory management**: There is a single allocator mechanism — the guest exports `hm_alloc(len) -> ptr` and `hm_dealloc(ptr, len)`. The host uses these to allocate/free memory in the guest's address space. There are no separate `host_alloc` imports; all guest memory allocation goes through the guest's own allocator exports.
+
+**Host function return conventions**:
+- `host_http_request(ptr, len) -> i64`: returns packed (ptr, len) pointing to MessagePack-serialized `PluginResult<HttpResponse>` in guest memory (allocated via `hm_alloc` by the host before returning)
+- `host_get_config(ptr, len) -> i64`: returns packed (ptr, len) pointing to MessagePack-serialized `Option<String>`. A zero-length result (len=0) represents `None`
+- `host_set_config(key_ptr, key_len, val_ptr, val_len) -> void`: fire-and-forget, errors are logged
+- `host_log(level, ptr, len) -> void`: fire-and-forget
 
 **Async bridging for host functions**:
 - When the WASM guest calls `host_http_request`, the host function blocks the current thread
@@ -358,6 +381,15 @@ Imports (host functions):               Provides these to the guest:
 - For FullPlugin: `hm_search`, `hm_get_comic`, etc. exports with serialization glue
 - `host_*` import bindings that the plugin calls as normal Rust functions
 - Guest-side allocator (`hm_alloc`, `hm_dealloc`) for memory management
+- Automatic input buffer deallocation after deserialization
+
+**FullPluginAdapter** (for WASM FullPlugin instances):
+
+`FullPluginAdapter` wraps a WASM module that exports `hm_search`, `hm_get_comic`, etc. Each `PluginAdapter` method:
+1. Serializes arguments to MessagePack
+2. Calls the corresponding WASM export via `spawn_blocking`
+3. Deserializes the `PluginResult<T>` from the returned buffer
+4. The `HostApi` is provided implicitly through WASM host function imports — the guest calls `host_http_request` etc. as needed during execution, and the host fulfills them synchronously (with internal async bridging)
 
 **Plugin SDK usage** (what third-party devs write):
 
@@ -375,7 +407,8 @@ impl SimplePlugin for MySitePlugin {
 }
 ```
 
-Compile with: `cargo build --target wasm32-wasip1 --release`
+Compile with: `cargo build --target wasm32-wasip1 --release` (requires Rust >= 1.78)
+Requires wasmtime >= 15.0 with WASI Preview 1.
 Output: `target/wasm32-wasip1/release/my_site_plugin.wasm`
 Install: copy to `~/.hmanga/plugins/`
 
@@ -481,7 +514,7 @@ pub struct DownloadManager {
     tasks: Arc<RwLock<HashMap<TaskId, DownloadTask>>>,
     chapter_sem: Arc<Semaphore>,
     image_sem: Arc<Semaphore>,
-    speed_tracker: Arc<SpeedTracker>,
+    speed_tracker: Arc<SpeedTracker>,  // bytes/sec, 3-second rolling window average
     event_tx: broadcast::Sender<DownloadEvent>,
 }
 
@@ -641,6 +674,7 @@ pub fn verify_code(code: &str) -> bool {
 
 ```json
 {
+  "version": 1,
   "donate_code": "HM-A1B2C3D4E5F6...",
   "download_dir": "/Users/xxx/Comics",
   "chapter_concurrency": 3,
@@ -650,6 +684,8 @@ pub fn verify_code(code: &str) -> bool {
   "theme": "auto"
 }
 ```
+
+All persisted JSON files include a `"version"` field for future migration. On startup, the app checks the version and applies any necessary schema migrations before loading.
 
 ## CI/CD
 
