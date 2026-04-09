@@ -9,3 +9,10 @@ path = "src/lib.rs"
 
 [dependencies]
 hmanga-core.workspace = true
+hmanga-plugin-sdk.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rmp-serde.workspace = true
+thiserror.workspace = true
+wasmtime.workspace = true
