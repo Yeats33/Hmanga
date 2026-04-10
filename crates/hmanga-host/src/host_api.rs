@@ -11,11 +11,16 @@ pub struct HostRuntime {
 
 impl HostRuntime {
     pub fn new() -> Self {
-        let client = Client::builder()
-            .cookie_store(true)
-            .build()
-            .expect("failed to build reqwest client");
-        Self { client }
+        Self::new_with_proxy(None).expect("failed to build reqwest client")
+    }
+
+    pub fn new_with_proxy(proxy: Option<&str>) -> Result<Self, String> {
+        let mut builder = Client::builder().cookie_store(true);
+        if let Some(proxy) = proxy.filter(|value| !value.trim().is_empty()) {
+            builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|err| err.to_string())?);
+        }
+        let client = builder.build().map_err(|err| err.to_string())?;
+        Ok(Self { client })
     }
 }
 

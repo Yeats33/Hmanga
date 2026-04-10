@@ -19,16 +19,18 @@ pub fn App() -> Element {
         let mut ui_handle = ui;
         spawn(async move {
             let library = services.read_library().unwrap_or_default();
-            let saved_username = services.config().jm_username.clone();
-            let saved_password = services.config().jm_password.clone();
+            let config = services.config();
+            let saved_username = config.jm_username.clone();
+            let saved_password = config.jm_password.clone();
             ui_handle.with_mut(|state| {
                 state.library = library;
                 state.jm_username = saved_username.clone();
                 state.jm_password = saved_password.clone();
+                state.settings_config = config.clone();
                 state.status = format!(
                     "配置：{} ｜ 下载目录：{}",
                     services.config_path().to_string_lossy(),
-                    services.config().download_dir.to_string_lossy()
+                    config.download_dir.to_string_lossy()
                 );
             });
 
@@ -104,6 +106,13 @@ pub fn App() -> Element {
                         move |_| {
                             let mut ui_handle = ui_handle;
                             ui_handle.with_mut(|state| state.workspace_tab = WorkspaceTab::Library);
+                        }
+                    })}
+                    {workspace_button(workspace_tab == WorkspaceTab::Settings, "设置", {
+                        let ui_handle = ui;
+                        move |_| {
+                            let mut ui_handle = ui_handle;
+                            ui_handle.with_mut(|state| state.workspace_tab = WorkspaceTab::Settings);
                         }
                     })}
                 }
@@ -228,11 +237,14 @@ pub fn App() -> Element {
                                         let services = services.read().clone();
                                         let mut ui_handle = ui;
                                         let favorites = ui_handle.read().search_results.clone();
+                                        let favorites_interval =
+                                            ui_handle.read().settings_config.download_all_favorites_interval_sec;
                                         ui_handle.with_mut(|state| {
                                             state.status = format!("开始批量下载收藏夹，共 {} 部漫画。", favorites.len());
                                         });
                                         spawn(async move {
-                                            for favorite in favorites {
+                                            let total = favorites.len();
+                                            for (index, favorite) in favorites.into_iter().enumerate() {
                                                 let comic = match services.load_jm_comic(&favorite.id).await {
                                                     Ok(comic) => comic,
                                                     Err(err) => {
@@ -243,7 +255,21 @@ pub fn App() -> Element {
                                                 for chapter in comic.chapters.clone() {
                                                     enqueue_download(&mut ui_handle, services.clone(), comic.clone(), chapter);
                                                 }
+                                                if favorites_interval > 0 && index + 1 < total {
+                                                    ui_handle.with_mut(|state| {
+                                                        state.status = format!(
+                                                            "收藏夹批量下载已处理 {}/{}，等待 {} 秒后继续...",
+                                                            index + 1,
+                                                            total,
+                                                            favorites_interval
+                                                        );
+                                                    });
+                                                    tokio::time::sleep(std::time::Duration::from_secs(favorites_interval)).await;
+                                                }
                                             }
+                                            ui_handle.with_mut(|state| {
+                                                state.status = format!("收藏夹批量下载任务已加入队列，共 {} 部漫画。", total);
+                                            });
                                         });
                                     },
                                     "下载全部收藏"
@@ -684,12 +710,42 @@ pub fn App() -> Element {
                             }
                         }
                     }
-                } else {
+                } else if workspace_tab == WorkspaceTab::Library {
                     div {
                         style: "flex:1; display:flex; min-height:0;",
                         div {
                             style: "flex:1; overflow:auto; padding:18px 20px; border-right:1px solid #d7d2c6;",
-                            h2 { style: section_title_style(), "本地书架" }
+                            div { style: "display:flex; align-items:center; gap:12px; margin-bottom:14px;",
+                                h2 { style: "margin:0; font-size:16px; font-weight:800; letter-spacing:0.02em;", "本地书架" }
+                                button {
+                                    style: "margin-left:auto; padding:8px 12px; border:none; border-radius:10px; background:#8a6f2f; color:white; font-weight:700; cursor:pointer;",
+                                    onclick: move |_| {
+                                        let services = services.read().clone();
+                                        let mut ui_handle = ui;
+                                        ui_handle.with_mut(|state| state.status = "正在扫描库存并追加缺失章节...".to_string());
+                                        spawn(async move {
+                                            let result = services.update_library_queue().await;
+                                            match result {
+                                                Ok(queue) => {
+                                                    let total = queue.len();
+                                                    for (comic, chapter) in queue {
+                                                        enqueue_download(&mut ui_handle, services.clone(), comic, chapter);
+                                                    }
+                                                    ui_handle.with_mut(|state| {
+                                                        state.status = if total == 0 {
+                                                            "库存已是最新，无需补下。".to_string()
+                                                        } else {
+                                                            format!("库存扫描完成，已追加 {} 个章节到下载队列。", total)
+                                                        };
+                                                    });
+                                                }
+                                                Err(err) => ui_handle.with_mut(|state| state.status = err),
+                                            }
+                                        });
+                                    },
+                                    "更新库存"
+                                }
+                            }
                             if library.is_empty() {
                                 {empty_block("下载目录还没有漫画。")}
                             } else {
@@ -703,6 +759,7 @@ pub fn App() -> Element {
                                                     title: format!("{} / {}", chapter.comic_title, chapter.chapter_title),
                                                     pages: chapter.pages.iter().map(|path| to_browser_src(path)).collect(),
                                                     current_index: 0,
+                                                    source_dir: Some(chapter.chapter_dir.clone()),
                                                 });
                                                 state.status = format!("打开阅读器：{}", state.reader.title);
                                             });
@@ -745,6 +802,184 @@ pub fn App() -> Element {
                             style: "width:460px; min-width:320px; overflow:auto; padding:18px 20px; background:#faf7f0;",
                             h2 { style: section_title_style(), "阅读器" }
                             {reader_panel(reader.clone(), ui, "从左侧本地漫画列表选择章节后在这里阅读。", true)}
+                        }
+                    }
+                } else {
+                    div {
+                        style: "flex:1; overflow:auto; padding:24px; background:#fffdfa;",
+                        h2 { style: section_title_style(), "设置" }
+                        div {
+                            style: "display:flex; flex-direction:column; gap:14px; max-width:760px; padding:18px; border-radius:18px; background:white; border:1px solid #ebe4d8;",
+                            div {
+                                style: "display:grid; grid-template-columns:160px 1fr; gap:12px; align-items:center;",
+                                label { style: "font-weight:700;", "下载目录" }
+                                input {
+                                    style: "padding:12px 14px; border-radius:12px; border:1px solid #d8cfbe; background:white;",
+                                    value: "{ui.read().settings_config.download_dir.to_string_lossy()}",
+                                    oninput: move |event| ui.with_mut(|state| state.settings_config.download_dir = std::path::PathBuf::from(event.value()))
+                                }
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:160px 1fr; gap:12px; align-items:center;",
+                                label { style: "font-weight:700;", "导出目录" }
+                                input {
+                                    style: "padding:12px 14px; border-radius:12px; border:1px solid #d8cfbe; background:white;",
+                                    value: "{ui.read().settings_config.export_dir.to_string_lossy()}",
+                                    oninput: move |event| ui.with_mut(|state| state.settings_config.export_dir = std::path::PathBuf::from(event.value()))
+                                }
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:160px 1fr; gap:12px; align-items:center;",
+                                label { style: "font-weight:700;", "章节并发数" }
+                                input {
+                                    r#type: "number",
+                                    min: "1",
+                                    style: "padding:12px 14px; border-radius:12px; border:1px solid #d8cfbe; background:white;",
+                                    value: "{ui.read().settings_config.chapter_concurrency}",
+                                    oninput: move |event| ui.with_mut(|state| {
+                                        state.settings_config.chapter_concurrency = event.value().parse::<usize>().unwrap_or(1).max(1);
+                                    })
+                                }
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:160px 1fr; gap:12px; align-items:center;",
+                                label { style: "font-weight:700;", "章节完成后休息秒数" }
+                                input {
+                                    r#type: "number",
+                                    min: "0",
+                                    style: "padding:12px 14px; border-radius:12px; border:1px solid #d8cfbe; background:white;",
+                                    value: "{ui.read().settings_config.chapter_download_interval_sec}",
+                                    oninput: move |event| ui.with_mut(|state| {
+                                        state.settings_config.chapter_download_interval_sec = event.value().parse::<u64>().unwrap_or(0);
+                                    })
+                                }
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:160px 1fr; gap:12px; align-items:center;",
+                                label { style: "font-weight:700;", "图片并发数" }
+                                input {
+                                    r#type: "number",
+                                    min: "1",
+                                    style: "padding:12px 14px; border-radius:12px; border:1px solid #d8cfbe; background:white;",
+                                    value: "{ui.read().settings_config.image_concurrency}",
+                                    oninput: move |event| ui.with_mut(|state| {
+                                        state.settings_config.image_concurrency = event.value().parse::<usize>().unwrap_or(1).max(1);
+                                    })
+                                }
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:160px 1fr; gap:12px; align-items:center;",
+                                label { style: "font-weight:700;", "每张图片后休息秒数" }
+                                input {
+                                    r#type: "number",
+                                    min: "0",
+                                    style: "padding:12px 14px; border-radius:12px; border:1px solid #d8cfbe; background:white;",
+                                    value: "{ui.read().settings_config.image_download_interval_sec}",
+                                    oninput: move |event| ui.with_mut(|state| {
+                                        state.settings_config.image_download_interval_sec = event.value().parse::<u64>().unwrap_or(0);
+                                    })
+                                }
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:160px 1fr; gap:12px; align-items:center;",
+                                label { style: "font-weight:700;", "收藏夹批量间隔秒数" }
+                                input {
+                                    r#type: "number",
+                                    min: "0",
+                                    style: "padding:12px 14px; border-radius:12px; border:1px solid #d8cfbe; background:white;",
+                                    value: "{ui.read().settings_config.download_all_favorites_interval_sec}",
+                                    oninput: move |event| ui.with_mut(|state| {
+                                        state.settings_config.download_all_favorites_interval_sec = event.value().parse::<u64>().unwrap_or(0);
+                                    })
+                                }
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:160px 1fr; gap:12px; align-items:center;",
+                                label { style: "font-weight:700;", "库存更新间隔秒数" }
+                                input {
+                                    r#type: "number",
+                                    min: "0",
+                                    style: "padding:12px 14px; border-radius:12px; border:1px solid #d8cfbe; background:white;",
+                                    value: "{ui.read().settings_config.update_downloaded_comics_interval_sec}",
+                                    oninput: move |event| ui.with_mut(|state| {
+                                        state.settings_config.update_downloaded_comics_interval_sec = event.value().parse::<u64>().unwrap_or(0);
+                                    })
+                                }
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:160px 1fr; gap:12px; align-items:center;",
+                                label { style: "font-weight:700;", "API 域名" }
+                                input {
+                                    style: "padding:12px 14px; border-radius:12px; border:1px solid #d8cfbe; background:white;",
+                                    value: "{ui.read().settings_config.api_domain}",
+                                    oninput: move |event| ui.with_mut(|state| state.settings_config.api_domain = event.value())
+                                }
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:160px 1fr; gap:12px; align-items:center;",
+                                label { style: "font-weight:700;", "自定义 API 域名" }
+                                input {
+                                    style: "padding:12px 14px; border-radius:12px; border:1px solid #d8cfbe; background:white;",
+                                    value: "{ui.read().settings_config.custom_api_domain}",
+                                    oninput: move |event| ui.with_mut(|state| state.settings_config.custom_api_domain = event.value())
+                                }
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:160px 1fr; gap:12px; align-items:center;",
+                                label { style: "font-weight:700;", "HTTP 代理" }
+                                input {
+                                    style: "padding:12px 14px; border-radius:12px; border:1px solid #d8cfbe; background:white;",
+                                    value: "{ui.read().settings_config.proxy.clone().unwrap_or_default()}",
+                                    placeholder: "例如 http://127.0.0.1:7890",
+                                    oninput: move |event| ui.with_mut(|state| {
+                                        let value = event.value();
+                                        state.settings_config.proxy = if value.trim().is_empty() {
+                                            None
+                                        } else {
+                                            Some(value)
+                                        };
+                                    })
+                                }
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:160px 1fr; gap:12px; align-items:center;",
+                                label { style: "font-weight:700;", "JM 用户名" }
+                                input {
+                                    style: "padding:12px 14px; border-radius:12px; border:1px solid #d8cfbe; background:white;",
+                                    value: "{ui.read().settings_config.jm_username}",
+                                    oninput: move |event| ui.with_mut(|state| state.settings_config.jm_username = event.value())
+                                }
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:160px 1fr; gap:12px; align-items:center;",
+                                label { style: "font-weight:700;", "JM 密码" }
+                                input {
+                                    r#type: "password",
+                                    style: "padding:12px 14px; border-radius:12px; border:1px solid #d8cfbe; background:white;",
+                                    value: "{ui.read().settings_config.jm_password}",
+                                    oninput: move |event| ui.with_mut(|state| state.settings_config.jm_password = event.value())
+                                }
+                            }
+                            div {
+                                style: "display:flex; justify-content:flex-end; gap:10px; margin-top:8px;",
+                                button {
+                                    style: button_style(true),
+                                    onclick: move |_| {
+                                        let services = services.read().clone();
+                                        let mut ui_handle = ui;
+                                        let config = ui_handle.read().settings_config.clone();
+                                        match services.save_config(&config) {
+                                            Ok(()) => ui_handle.with_mut(|state| {
+                                                state.jm_username = config.jm_username.clone();
+                                                state.jm_password = config.jm_password.clone();
+                                                state.status = "设置已保存。".to_string();
+                                            }),
+                                            Err(err) => ui_handle.with_mut(|state| state.status = err),
+                                        }
+                                    },
+                                    "保存设置"
+                                }
+                            }
                         }
                     }
                 }
@@ -963,7 +1198,21 @@ fn download_chapter_row(
     services: AppServices,
     mut ui: Signal<UiState>,
 ) -> Element {
-    let local_chapter = find_local_chapter(&library, &chapter.id);
+    let chapter_dir = preview_chapter_dir(&services, &comic.title, &chapter.title);
+    let local_chapter = find_local_chapter(&library, &chapter.id).or_else(|| {
+        partial_chapter_from_download(&DownloadRow {
+            chapter_id: chapter.id.clone(),
+            label: format!("{} / {}", comic.title, chapter.title),
+            comic_title: comic.title.clone(),
+            chapter_title: chapter.title.clone(),
+            chapter_dir,
+            status: DownloadRowState::Downloading,
+            detail: String::new(),
+            downloaded_pages: 0,
+            total_pages: 0,
+            current_item: String::new(),
+        })
+    });
     rsx! {
         div {
             key: "{chapter.id}",
@@ -981,6 +1230,7 @@ fn download_chapter_row(
                                 title: format!("{} / {}", local_chapter.comic_title, local_chapter.chapter_title),
                                 pages: local_chapter.pages.iter().map(|path| to_browser_src(path)).collect(),
                                 current_index: 0,
+                                source_dir: Some(local_chapter.chapter_dir.clone()),
                             });
                             state.status = format!("打开阅读器：{}", state.reader.title);
                         });
@@ -999,13 +1249,45 @@ fn download_chapter_row(
                         state.downloads.insert(0, DownloadRow {
                             chapter_id: chapter.id.clone(),
                             label: format!("{} / {}", comic.title, chapter.title),
+                            comic_title: comic.title.clone(),
+                            chapter_title: chapter.title.clone(),
+                            chapter_dir: preview_chapter_dir(&services_handle, &comic.title, &chapter.title),
                             status: DownloadRowState::Downloading,
                             detail: "任务已创建".to_string(),
+                            downloaded_pages: 0,
+                            total_pages: 0,
+                            current_item: String::new(),
                         });
                     });
                     let services_task = services_handle.clone();
                     spawn(async move {
-                        let result = services_task.download_jm_chapter(&comic, &chapter).await;
+                        let result = services_task
+                            .download_jm_chapter(&comic, &chapter, {
+                                let mut ui_progress = ui_handle;
+                                let chapter_id = chapter.id.clone();
+                                move |downloaded, total, current_item| {
+                                    ui_progress.with_mut(|state| {
+                                        if let Some(row) = state
+                                            .downloads
+                                            .iter_mut()
+                                            .find(|row| row.chapter_id == chapter_id)
+                                        {
+                                            row.downloaded_pages = downloaded;
+                                            row.total_pages = total;
+                                            row.current_item = current_item.to_string();
+                                            row.detail = if total == 0 {
+                                                "准备下载资源...".to_string()
+                                            } else if downloaded >= total {
+                                                format!("已完成 {downloaded}/{total}")
+                                            } else {
+                                                format!("已下载 {downloaded}/{total} · {current_item}")
+                                            };
+                                        }
+                                        refresh_reader_from_download(state, &chapter_id);
+                                    });
+                                }
+                            })
+                            .await;
                         let library = services_task.read_library().unwrap_or_default();
                         ui_handle.with_mut(|state| {
                             if let Some(row) = state.downloads.iter_mut().find(|row| row.chapter_id == chapter.id) {
@@ -1018,6 +1300,9 @@ fn download_chapter_row(
                                     Ok(_) => "下载完成".to_string(),
                                     Err(err) => err.clone(),
                                 };
+                                if matches!(row.status, DownloadRowState::Completed) && row.total_pages == 0 {
+                                    row.total_pages = row.downloaded_pages;
+                                }
                             }
                             state.library = library;
                             state.status = match result {
@@ -1026,6 +1311,7 @@ fn download_chapter_row(
                                         title: format!("{} / {}", local_chapter.comic_title, local_chapter.chapter_title),
                                         pages: local_chapter.pages.iter().map(|path| to_browser_src(path)).collect(),
                                         current_index: 0,
+                                        source_dir: Some(local_chapter.chapter_dir.clone()),
                                     });
                                     format!("{} 下载完成。", chapter.title)
                                 }
@@ -1046,7 +1332,8 @@ fn download_queue_row(
     services: AppServices,
     mut ui: Signal<UiState>,
 ) -> Element {
-    let local_chapter = find_local_chapter(&library, &row.chapter_id);
+    let local_chapter = find_local_chapter(&library, &row.chapter_id)
+        .or_else(|| partial_chapter_from_download(&row));
     let pause_services = services.clone();
     let cancel_services = services.clone();
     let resume_services = services.clone();
@@ -1064,6 +1351,15 @@ fn download_queue_row(
             div { style: "margin-top:6px; color:#7a7366;", "{row.status.label()}" }
             if !row.detail.is_empty() {
                 div { style: "margin-top:4px; color:#9a9385; font-size:12px;", "{row.detail}" }
+            }
+            if row.total_pages > 0 {
+                div {
+                    style: "margin-top:4px; color:#9a9385; font-size:12px;",
+                    "进度 {row.downloaded_pages}/{row.total_pages}"
+                    if !row.current_item.is_empty() {
+                        span { " · 当前 {row.current_item}" }
+                    }
+                }
             }
             div { style: "display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;",
                 if matches!(row.status, DownloadRowState::Downloading) {
@@ -1117,6 +1413,7 @@ fn download_queue_row(
                                 title: format!("{} / {}", local_chapter.comic_title, local_chapter.chapter_title),
                                 pages: local_chapter.pages.iter().map(|path| to_browser_src(path)).collect(),
                                 current_index: 0,
+                                source_dir: Some(local_chapter.chapter_dir.clone()),
                             });
                             state.status = format!("打开阅读器：{}", state.reader.title);
                         });
@@ -1147,15 +1444,47 @@ fn enqueue_download(
             DownloadRow {
                 chapter_id: chapter.id.clone(),
                 label: format!("{} / {}", comic.title, chapter.title),
+                comic_title: comic.title.clone(),
+                chapter_title: chapter.title.clone(),
+                chapter_dir: preview_chapter_dir(&services, &comic.title, &chapter.title),
                 status: DownloadRowState::Downloading,
                 detail: "任务已创建".to_string(),
+                downloaded_pages: 0,
+                total_pages: 0,
+                current_item: String::new(),
             },
         );
     });
 
     let mut ui_task = *ui_handle;
     spawn(async move {
-        let result = services.download_jm_chapter(&comic, &chapter).await;
+        let result = services
+            .download_jm_chapter(&comic, &chapter, {
+                let mut ui_progress = ui_task;
+                let chapter_id = chapter.id.clone();
+                move |downloaded, total, current_item| {
+                    ui_progress.with_mut(|state| {
+                        if let Some(row) = state
+                            .downloads
+                            .iter_mut()
+                            .find(|row| row.chapter_id == chapter_id)
+                        {
+                            row.downloaded_pages = downloaded;
+                            row.total_pages = total;
+                            row.current_item = current_item.to_string();
+                            row.detail = if total == 0 {
+                                "准备下载资源...".to_string()
+                            } else if downloaded >= total {
+                                format!("已完成 {downloaded}/{total}")
+                            } else {
+                                format!("已下载 {downloaded}/{total} · {current_item}")
+                            };
+                        }
+                        refresh_reader_from_download(state, &chapter_id);
+                    });
+                }
+            })
+            .await;
         let library = services.read_library().unwrap_or_default();
         ui_task.with_mut(|state| {
             if let Some(row) = state
@@ -1172,6 +1501,9 @@ fn enqueue_download(
                     Ok(_) => "下载完成".to_string(),
                     Err(err) => err.clone(),
                 };
+                if matches!(row.status, DownloadRowState::Completed) && row.total_pages == 0 {
+                    row.total_pages = row.downloaded_pages;
+                }
             }
             state.library = library;
         });
@@ -1281,4 +1613,99 @@ fn find_local_chapter(
         .flat_map(|comic| comic.chapters.iter())
         .find(|chapter| chapter.chapter_id == chapter_id)
         .cloned()
+}
+
+fn refresh_reader_from_download(state: &mut UiState, chapter_id: &str) {
+    let Some(source_dir) = state.reader.source_dir.clone() else {
+        return;
+    };
+    let matching_download = state
+        .downloads
+        .iter()
+        .find(|row| row.chapter_id == chapter_id && row.chapter_dir == source_dir);
+    let Some(download) = matching_download else {
+        return;
+    };
+
+    let Some(partial) = partial_chapter_from_download(download) else {
+        return;
+    };
+
+    let previous_len = state.reader.pages.len();
+    state.reader.pages = partial
+        .pages
+        .iter()
+        .map(|path| to_browser_src(path))
+        .collect::<Vec<_>>();
+    if state.reader.pages.is_empty() {
+        state.reader.current_index = 0;
+    } else if state.reader.current_index >= state.reader.pages.len() {
+        state.reader.current_index = state.reader.pages.len() - 1;
+    } else if state.reader.current_index + 1 == previous_len {
+        state.reader.current_index = previous_len.saturating_sub(1);
+    }
+}
+
+fn partial_chapter_from_download(row: &DownloadRow) -> Option<LocalChapterEntry> {
+    if !row.chapter_dir.exists() {
+        return None;
+    }
+
+    let mut pages = std::fs::read_dir(&row.chapter_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| matches!(ext, "png" | "gif" | "jpg" | "jpeg" | "webp"))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    pages.sort();
+    if pages.is_empty() {
+        return None;
+    }
+
+    Some(LocalChapterEntry {
+        comic_id: String::new(),
+        comic_title: row.comic_title.clone(),
+        chapter_id: row.chapter_id.clone(),
+        chapter_title: row.chapter_title.clone(),
+        chapter_dir: row.chapter_dir.clone(),
+        pages,
+    })
+}
+
+fn preview_chapter_dir(
+    services: &AppServices,
+    comic_title: &str,
+    chapter_title: &str,
+) -> std::path::PathBuf {
+    let config = services.config();
+    config
+        .download_dir
+        .join(ui_filename_filter(comic_title))
+        .join(ui_filename_filter(chapter_title))
+}
+
+fn ui_filename_filter(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '\\' | '/' | '\n' => ' ',
+            ':' => '：',
+            '*' => '⭐',
+            '?' => '？',
+            '"' => '\'',
+            '<' => '《',
+            '>' => '》',
+            '|' => '丨',
+            _ => ch,
+        })
+        .collect::<String>()
+        .trim()
+        .trim_end_matches('.')
+        .trim()
+        .to_string()
 }

@@ -8,7 +8,9 @@ use std::time::Duration;
 use base64::Engine;
 use hmanga_core::{download::ExportRunner, AppConfig, Comic, HostApi, HttpMethod, HttpRequest};
 use hmanga_host::HostRuntime;
-use hmanga_plugin_jm::{JmPlugin, JmUserProfile, JmWeeklyInfo};
+use hmanga_plugin_jm::{JmPlugin, JmUserProfile, JmWeeklyInfo, ProcessedImage};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,11 +40,11 @@ pub struct FavoritePage {
 
 #[derive(Clone)]
 pub struct AppServices {
-    host: HostRuntime,
-    jm: JmPlugin,
-    config: AppConfig,
+    host: Arc<Mutex<HostRuntime>>,
+    jm: Arc<Mutex<JmPlugin>>,
+    config: Arc<Mutex<AppConfig>>,
     config_path: PathBuf,
-    download_root: PathBuf,
+    chapter_gate: Arc<Mutex<Arc<Semaphore>>>,
     task_controls: Arc<Mutex<HashMap<String, Arc<DownloadControl>>>>,
 }
 
@@ -64,13 +66,15 @@ impl AppServices {
         let config_path = config_dir.join("config.json");
         let config = load_or_init_config(&config_path, default_download_dir)?;
         fs::create_dir_all(&config.download_dir).map_err(|err| err.to_string())?;
+        fs::create_dir_all(&config.export_dir).map_err(|err| err.to_string())?;
+        let chapter_concurrency = config.chapter_concurrency.max(1);
 
         Ok(Self {
-            host: HostRuntime::new(),
-            jm: JmPlugin::default(),
-            download_root: config.download_dir.clone(),
-            config,
+            host: Arc::new(Mutex::new(build_host_runtime(&config)?)),
+            jm: Arc::new(Mutex::new(build_jm_plugin(&config))),
+            config: Arc::new(Mutex::new(config)),
             config_path,
+            chapter_gate: Arc::new(Mutex::new(Arc::new(Semaphore::new(chapter_concurrency)))),
             task_controls: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -79,15 +83,35 @@ impl AppServices {
         &self.config_path
     }
 
-    pub fn config(&self) -> &AppConfig {
-        &self.config
+    pub fn config(&self) -> AppConfig {
+        self.config.lock().unwrap().clone()
+    }
+
+    fn host(&self) -> HostRuntime {
+        self.host.lock().unwrap().clone()
+    }
+
+    fn jm(&self) -> JmPlugin {
+        self.jm.lock().unwrap().clone()
     }
 
     pub fn save_jm_credentials(&self, username: &str, password: &str) -> Result<(), String> {
-        let mut config = self.config.clone();
+        let mut config = self.config();
         config.jm_username = username.to_string();
         config.jm_password = password.to_string();
-        persist_config(&self.config_path, &config)
+        self.save_config(&config)
+    }
+
+    pub fn save_config(&self, config: &AppConfig) -> Result<(), String> {
+        fs::create_dir_all(&config.download_dir).map_err(|err| err.to_string())?;
+        fs::create_dir_all(&config.export_dir).map_err(|err| err.to_string())?;
+        persist_config(&self.config_path, config)?;
+        *self.config.lock().unwrap() = config.clone();
+        *self.host.lock().unwrap() = build_host_runtime(config)?;
+        *self.jm.lock().unwrap() = build_jm_plugin(config);
+        *self.chapter_gate.lock().unwrap() =
+            Arc::new(Semaphore::new(config.chapter_concurrency.max(1)));
+        Ok(())
     }
 
     pub async fn search_aggregate(&self, query: &str) -> Result<Vec<Comic>, String> {
@@ -95,34 +119,39 @@ impl AppServices {
     }
 
     pub async fn search_jm(&self, query: &str) -> Result<Vec<Comic>, String> {
-        self.jm
-            .search(&self.host, query, 1, hmanga_core::SearchSort::Latest)
+        let jm = self.jm();
+        let host = self.host();
+        jm.search(&host, query, 1, hmanga_core::SearchSort::Latest)
             .await
             .map(|result| result.comics)
             .map_err(|err| err.to_string())
     }
 
     pub async fn load_jm_comic(&self, comic_id: &str) -> Result<Comic, String> {
-        self.jm
-            .get_comic(&self.host, comic_id)
+        let jm = self.jm();
+        let host = self.host();
+        jm.get_comic(&host, comic_id)
             .await
             .map_err(|err| err.to_string())
     }
 
     pub async fn login_jm(&self, username: &str, password: &str) -> Result<JmUserProfile, String> {
-        self.jm
-            .login(&self.host, username, password)
+        let jm = self.jm();
+        let host = self.host();
+        jm.login(&host, username, password)
             .await
             .map_err(|err| err.to_string())?;
-        self.jm
-            .get_user_profile(&self.host)
+        let jm = self.jm();
+        let host = self.host();
+        jm.get_user_profile(&host)
             .await
             .map_err(|err| err.to_string())
     }
 
     pub async fn get_jm_favorites_page(&self, page: u32) -> Result<FavoritePage, String> {
-        self.jm
-            .get_favorites(&self.host, 0, page)
+        let jm = self.jm();
+        let host = self.host();
+        jm.get_favorites(&host, 0, page)
             .await
             .map(|result| FavoritePage {
                 comics: result.comics,
@@ -133,8 +162,9 @@ impl AppServices {
     }
 
     pub async fn get_jm_weekly_info(&self) -> Result<JmWeeklyInfo, String> {
-        self.jm
-            .get_weekly_info(&self.host)
+        let jm = self.jm();
+        let host = self.host();
+        jm.get_weekly_info(&host)
             .await
             .map_err(|err| err.to_string())
     }
@@ -144,8 +174,9 @@ impl AppServices {
         category_id: &str,
         type_id: &str,
     ) -> Result<Vec<Comic>, String> {
-        self.jm
-            .get_weekly(&self.host, category_id, type_id)
+        let jm = self.jm();
+        let host = self.host();
+        jm.get_weekly(&host, category_id, type_id)
             .await
             .map(|result| result.comics)
             .map_err(|err| err.to_string())
@@ -155,47 +186,66 @@ impl AppServices {
         &self,
         comic: &Comic,
         chapter: &hmanga_core::ChapterInfo,
+        mut on_progress: impl FnMut(u32, u32, &str),
     ) -> Result<LocalChapterEntry, String> {
         let control = self.download_control(&chapter.id);
-        let comic_dir =
-            self.download_root
-                .join(format!("{}-{}", comic.id, sanitize_filename(&comic.title)));
-        let chapter_dir = comic_dir.join(format!(
-            "{}-{}",
-            chapter.id,
-            sanitize_filename(&chapter.title)
-        ));
-        fs::create_dir_all(&chapter_dir).map_err(|err| err.to_string())?;
-
-        let images = self
-            .jm
-            .get_chapter_images(&self.host, &chapter.id)
+        let config = self.config();
+        let host = self.host();
+        let jm = self.jm();
+        let chapter_gate = self.chapter_gate.lock().unwrap().clone();
+        let _permit = chapter_gate
+            .acquire_owned()
             .await
             .map_err(|err| err.to_string())?;
+        let (comic_dir, chapter_dir) = build_jm_download_dirs(&config.download_dir, comic, chapter);
+        fs::create_dir_all(&chapter_dir).map_err(|err| err.to_string())?;
 
-        for (index, image) in images.iter().enumerate() {
+        let images = jm
+            .get_chapter_images(&host, &chapter.id)
+            .await
+            .map_err(|err| err.to_string())?;
+        let total_pages = images.len() as u32;
+        let image_concurrency = config.image_concurrency.max(1);
+        let mut next_to_spawn = 0usize;
+        let mut completed = 0u32;
+        let mut join_set = JoinSet::new();
+
+        while next_to_spawn < image_concurrency.min(images.len()) {
+            let image = images[next_to_spawn].clone();
+            spawn_image_task(
+                &mut join_set,
+                host.clone(),
+                jm.clone(),
+                image,
+                next_to_spawn,
+            );
+            next_to_spawn += 1;
+        }
+
+        while let Some(joined) = join_set.join_next().await {
             control.wait_until_active().await?;
-            let response = self
-                .host
-                .http_request(HttpRequest {
-                    url: image.url.clone(),
-                    method: HttpMethod::Get,
-                    headers: HashMap::new(),
-                    body: None,
-                })
-                .await
+            let (index, _current_name, processed) = joined.map_err(|err| err.to_string())??;
+            let filename = format!("{:04}.{}", index + 1, processed.extension);
+            fs::write(chapter_dir.join(&filename), processed.bytes)
                 .map_err(|err| err.to_string())?;
-            if response.status != 200 {
-                return Err(format!("下载图片失败: {}", response.status));
+            completed += 1;
+            on_progress(completed, total_pages, &filename);
+
+            if config.image_download_interval_sec > 0 {
+                sleep(Duration::from_secs(config.image_download_interval_sec)).await;
             }
 
-            let processed = self
-                .jm
-                .process_image(image, response.body)
-                .map_err(|err| err.to_string())?;
-            let filename = format!("{:04}.{}", index + 1, processed.extension);
-            fs::write(chapter_dir.join(filename), processed.bytes)
-                .map_err(|err| err.to_string())?;
+            if next_to_spawn < images.len() {
+                let image = images[next_to_spawn].clone();
+                spawn_image_task(
+                    &mut join_set,
+                    host.clone(),
+                    jm.clone(),
+                    image,
+                    next_to_spawn,
+                );
+                next_to_spawn += 1;
+            }
         }
 
         fs::create_dir_all(&comic_dir).map_err(|err| err.to_string())?;
@@ -204,6 +254,10 @@ impl AppServices {
             serde_json::to_string_pretty(comic).map_err(|err| err.to_string())?,
         )
         .map_err(|err| err.to_string())?;
+
+        if config.chapter_download_interval_sec > 0 {
+            sleep(Duration::from_secs(config.chapter_download_interval_sec)).await;
+        }
 
         let result = self.local_chapter_from_disk(comic, &comic_dir, chapter);
         self.task_controls.lock().unwrap().remove(&chapter.id);
@@ -229,9 +283,10 @@ impl AppServices {
     }
 
     pub fn read_library(&self) -> Result<Vec<LocalComicEntry>, String> {
-        let mut entries = self.read_zone_library(&self.download_root, None)?;
+        let config = self.config();
+        let mut entries = self.read_zone_library(&config.download_dir, None)?;
         for (subdir, platform_tag) in known_platform_subdirs() {
-            let platform_root = self.download_root.join(subdir);
+            let platform_root = config.download_dir.join(subdir);
             entries.extend(self.read_zone_library(&platform_root, Some(platform_tag.to_string()))?);
         }
         entries.sort_by(|left, right| left.comic.title.cmp(&right.comic.title));
@@ -247,17 +302,52 @@ impl AppServices {
     }
 
     pub fn export_local_chapter_cbz(&self, chapter: &LocalChapterEntry) -> Result<PathBuf, String> {
-        fs::create_dir_all(&self.config.export_dir).map_err(|err| err.to_string())?;
+        let config = self.config();
+        fs::create_dir_all(&config.export_dir).map_err(|err| err.to_string())?;
         let export_name = format!(
             "{}-{}.cbz",
             sanitize_filename(&chapter.comic_title),
             sanitize_filename(&chapter.chapter_title)
         );
-        let output_path = self.config.export_dir.join(export_name);
+        let output_path = config.export_dir.join(export_name);
         let runner = ExportRunner::new();
         let callback: Box<dyn Fn(hmanga_core::DownloadEvent) + Send + Sync> = Box::new(|_| {});
         runner.run_cbz(0, &chapter.chapter_dir, &output_path, &callback)?;
         Ok(output_path)
+    }
+
+    pub async fn update_library_queue(
+        &self,
+    ) -> Result<Vec<(Comic, hmanga_core::ChapterInfo)>, String> {
+        let config = self.config();
+        let library = self.read_library()?;
+        let mut queue = Vec::new();
+
+        for (index, item) in library.iter().enumerate() {
+            if item.comic.source != "jm" {
+                continue;
+            }
+
+            let latest = self.load_jm_comic(&item.comic.id).await?;
+            for chapter in latest.chapters.clone() {
+                let exists_locally = item
+                    .chapters
+                    .iter()
+                    .any(|local| local.chapter_id == chapter.id);
+                if !exists_locally {
+                    queue.push((latest.clone(), chapter));
+                }
+            }
+
+            if config.update_downloaded_comics_interval_sec > 0 && index + 1 < library.len() {
+                sleep(Duration::from_secs(
+                    config.update_downloaded_comics_interval_sec,
+                ))
+                .await;
+            }
+        }
+
+        Ok(queue)
     }
 
     fn local_chapter_from_disk(
@@ -266,11 +356,7 @@ impl AppServices {
         comic_dir: &Path,
         chapter: &hmanga_core::ChapterInfo,
     ) -> Result<LocalChapterEntry, String> {
-        let chapter_dir = comic_dir.join(format!(
-            "{}-{}",
-            chapter.id,
-            sanitize_filename(&chapter.title)
-        ));
+        let chapter_dir = comic_dir.join(sanitize_filename(&chapter.title));
         let mut pages = if chapter_dir.exists() {
             fs::read_dir(&chapter_dir)
                 .map_err(|err| err.to_string())?
@@ -348,9 +434,9 @@ impl AppServices {
             let Some(comic_dir) = metadata_path.parent() else {
                 continue;
             };
+            let download_root = self.config().download_dir;
             if known_platform_subdirs().iter().any(|(subdir, _)| {
-                source_root == self.download_root
-                    && comic_dir.starts_with(self.download_root.join(subdir))
+                source_root == download_root && comic_dir.starts_with(download_root.join(subdir))
             }) {
                 continue;
             }
@@ -500,6 +586,62 @@ fn sanitize_filename(value: &str) -> String {
         .trim_end_matches('.')
         .trim()
         .to_string()
+}
+
+fn build_jm_download_dirs(
+    root: &Path,
+    comic: &Comic,
+    chapter: &hmanga_core::ChapterInfo,
+) -> (PathBuf, PathBuf) {
+    let comic_dir = root.join(sanitize_filename(&comic.title));
+    let chapter_dir = comic_dir.join(sanitize_filename(&chapter.title));
+    (comic_dir, chapter_dir)
+}
+
+fn build_host_runtime(config: &AppConfig) -> Result<HostRuntime, String> {
+    HostRuntime::new_with_proxy(config.proxy.as_deref())
+}
+
+fn build_jm_plugin(config: &AppConfig) -> JmPlugin {
+    let api_domain = if config.custom_api_domain.trim().is_empty() {
+        config.api_domain.clone()
+    } else {
+        config.custom_api_domain.clone()
+    };
+    JmPlugin::default().with_api_domain(api_domain)
+}
+
+fn spawn_image_task(
+    join_set: &mut JoinSet<Result<(usize, String, ProcessedImage), String>>,
+    host: HostRuntime,
+    jm: JmPlugin,
+    image: hmanga_core::ImageUrl,
+    index: usize,
+) {
+    join_set.spawn(async move {
+        let current_name = image
+            .headers
+            .get("x-hmanga-jm-file-name")
+            .cloned()
+            .unwrap_or_else(|| format!("{:04}", index + 1));
+        let response = host
+            .http_request(HttpRequest {
+                url: image.url.clone(),
+                method: HttpMethod::Get,
+                headers: HashMap::new(),
+                body: None,
+            })
+            .await
+            .map_err(|err| err.to_string())?;
+        if response.status != 200 {
+            return Err(format!("下载图片失败: {}", response.status));
+        }
+
+        let processed = jm
+            .process_image(&image, response.body)
+            .map_err(|err| err.to_string())?;
+        Ok((index, current_name, processed))
+    });
 }
 
 fn resolve_config_dir() -> PathBuf {
@@ -742,6 +884,41 @@ mod tests {
     }
 
     #[test]
+    fn save_config_persists_multithread_fields() {
+        let config_dir = TempDir::new().unwrap();
+        let download_dir = TempDir::new().unwrap();
+        let services = AppServices::new_with_paths(
+            config_dir.path().to_path_buf(),
+            download_dir.path().to_path_buf(),
+        )
+        .unwrap();
+
+        let mut config = services.config().clone();
+        config.chapter_concurrency = 6;
+        config.chapter_download_interval_sec = 3;
+        config.image_concurrency = 24;
+        config.image_download_interval_sec = 1;
+        config.download_all_favorites_interval_sec = 5;
+        config.update_downloaded_comics_interval_sec = 7;
+        config.download_dir = download_dir.path().join("新目录");
+        config.export_dir = download_dir.path().join("导出目录");
+        services.save_config(&config).unwrap();
+
+        let persisted = serde_json::from_str::<AppConfig>(
+            &fs::read_to_string(config_dir.path().join("config.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.chapter_concurrency, 6);
+        assert_eq!(persisted.chapter_download_interval_sec, 3);
+        assert_eq!(persisted.image_concurrency, 24);
+        assert_eq!(persisted.image_download_interval_sec, 1);
+        assert_eq!(persisted.download_all_favorites_interval_sec, 5);
+        assert_eq!(persisted.update_downloaded_comics_interval_sec, 7);
+        assert_eq!(persisted.download_dir, download_dir.path().join("新目录"));
+        assert_eq!(persisted.export_dir, download_dir.path().join("导出目录"));
+    }
+
+    #[test]
     fn exports_local_chapter_as_cbz() {
         let config_dir = TempDir::new().unwrap();
         let download_dir = TempDir::new().unwrap();
@@ -865,5 +1042,31 @@ mod tests {
 
         assert_eq!(root_entry.platform_tag, None);
         assert_eq!(tagged_entry.platform_tag.as_deref(), Some("JM"));
+    }
+
+    #[test]
+    fn jm_download_paths_follow_reference_dir_fmt() {
+        let comic = Comic {
+            id: "123".to_string(),
+            source: "jm".to_string(),
+            title: "漫画:A/测试".to_string(),
+            author: "作者".to_string(),
+            cover_url: String::new(),
+            description: String::new(),
+            tags: Vec::new(),
+            chapters: vec![hmanga_core::ChapterInfo {
+                id: "456".to_string(),
+                title: "第1话 特别篇".to_string(),
+                page_count: None,
+            }],
+            extra: HashMap::new(),
+        };
+        let chapter = comic.chapters[0].clone();
+        let root = PathBuf::from("/tmp/books");
+
+        let (comic_dir, chapter_dir) = build_jm_download_dirs(&root, &comic, &chapter);
+
+        assert_eq!(comic_dir, root.join("漫画：A 测试"));
+        assert_eq!(chapter_dir, root.join("漫画：A 测试").join("第1话 特别篇"));
     }
 }

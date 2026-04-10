@@ -86,6 +86,11 @@ impl JmPlugin {
         self
     }
 
+    pub fn with_api_domain(mut self, api_domain: impl Into<String>) -> Self {
+        self.api_domain = api_domain.into();
+        self
+    }
+
     pub fn meta(&self) -> PluginMetaInfo {
         PluginMetaInfo {
             id: plugin_id().to_string(),

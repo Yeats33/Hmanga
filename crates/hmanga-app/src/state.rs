@@ -1,5 +1,7 @@
+use hmanga_core::AppConfig;
 use hmanga_core::Comic;
 use hmanga_plugin_jm::JmUserProfile;
+use std::path::PathBuf;
 
 use crate::service::LocalComicEntry;
 
@@ -13,6 +15,7 @@ pub enum SiteTab {
 pub enum WorkspaceTab {
     Downloads,
     Library,
+    Settings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,8 +41,14 @@ pub struct BrowseFilter {
 pub struct DownloadRow {
     pub chapter_id: String,
     pub label: String,
+    pub comic_title: String,
+    pub chapter_title: String,
+    pub chapter_dir: PathBuf,
     pub status: DownloadRowState,
     pub detail: String,
+    pub downloaded_pages: u32,
+    pub total_pages: u32,
+    pub current_item: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,6 +77,7 @@ pub struct ReaderState {
     pub title: String,
     pub pages: Vec<String>,
     pub current_index: usize,
+    pub source_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,6 +90,7 @@ pub struct UiState {
     pub jm_username: String,
     pub jm_password: String,
     pub jm_profile: Option<JmUserProfile>,
+    pub settings_config: AppConfig,
     pub favorites_page: u32,
     pub favorites_total_pages: u32,
     pub weekly_categories: Vec<BrowseFilter>,
@@ -107,6 +118,7 @@ impl Default for UiState {
             jm_username: String::new(),
             jm_password: String::new(),
             jm_profile: None,
+            settings_config: AppConfig::default(),
             favorites_page: 1,
             favorites_total_pages: 1,
             weekly_categories: Vec::new(),
@@ -166,6 +178,7 @@ mod tests {
             title: "demo".to_string(),
             pages: vec!["page-1".to_string()],
             current_index: 0,
+            source_dir: None,
         });
 
         assert_eq!(state.download_panel_tab, DownloadPanelTab::Preview);
@@ -190,11 +203,40 @@ mod tests {
     }
 
     #[test]
+    fn settings_page_is_a_peer_workspace() {
+        let state = UiState {
+            workspace_tab: WorkspaceTab::Settings,
+            ..Default::default()
+        };
+        assert_eq!(state.workspace_tab, WorkspaceTab::Settings);
+    }
+
+    #[test]
     fn download_row_state_labels_are_stable() {
         assert_eq!(DownloadRowState::Downloading.label(), "下载中");
         assert_eq!(DownloadRowState::Paused.label(), "已暂停");
         assert_eq!(DownloadRowState::Completed.label(), "已完成");
         assert_eq!(DownloadRowState::Failed.label(), "失败");
         assert_eq!(DownloadRowState::Cancelled.label(), "已取消");
+    }
+
+    #[test]
+    fn download_row_can_hold_progress_numbers() {
+        let row = DownloadRow {
+            chapter_id: "1".to_string(),
+            label: "demo".to_string(),
+            comic_title: "comic".to_string(),
+            chapter_title: "chapter".to_string(),
+            chapter_dir: PathBuf::from("/tmp/chapter"),
+            status: DownloadRowState::Downloading,
+            detail: "处理中".to_string(),
+            downloaded_pages: 3,
+            total_pages: 10,
+            current_item: "0003.png".to_string(),
+        };
+
+        assert_eq!(row.downloaded_pages, 3);
+        assert_eq!(row.total_pages, 10);
+        assert_eq!(row.current_item, "0003.png");
     }
 }
