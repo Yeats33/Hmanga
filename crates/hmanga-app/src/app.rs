@@ -476,77 +476,46 @@ pub fn App() -> Element {
                                 }
                             }
                         }
-                        if browse_tab == BrowseTab::Weekly && !weekly_categories.is_empty() {
-                            div { style: "display:flex; gap:8px; flex-wrap:wrap;",
-                                for category in weekly_categories {
-                                    {subtab_button(selected_weekly_category.as_deref() == Some(category.id.as_str()), category.label.clone(), {
-                                        let ui_handle = ui;
-                                        let services = services.read().clone();
-                                        let category_id = category.id.clone();
-                                        let selected_type = selected_weekly_type.clone().unwrap_or_else(|| "0".to_string());
-                                        move |_| {
-                                            let mut ui_handle = ui_handle;
-                                            ui_handle.with_mut(|state| {
-                                                state.loading = true;
-                                                state.selected_weekly_category = Some(category_id.clone());
-                                                state.status = "切换每周分类...".to_string();
-                                            });
-                                            let services = services.clone();
-                                            let category_id = category_id.clone();
-                                            let selected_type = selected_type.clone();
-                                            spawn(async move {
-                                                let result = services.get_jm_weekly(&category_id, &selected_type).await;
-                                                ui_handle.with_mut(|state| {
-                                                    state.loading = false;
-                                                    match result {
-                                                        Ok(comics) => {
-                                                            state.search_results = comics;
-                                                            state.selected_comic = None;
-                                                            state.status = format!("每周必看已切换，共 {} 项。", state.search_results.len());
-                                                        }
-                                                        Err(err) => state.status = err,
-                                                    }
-                                                });
-                                            });
+                        if browse_tab == BrowseTab::Weekly {
+                            div { style: "padding:14px 20px; border-bottom:1px solid #ebe4d8; background:#faf8f4;",
+                                div { style: "font-size:13px; font-weight:800; color:#8a6f2f; margin-bottom:10px;", "每周必看" }
+                                if !weekly_types.is_empty() {
+                                    div { style: "display:flex; align-items:center; gap:8px; flex-wrap:wrap;",
+                                        span { style: "font-size:12px; font-weight:700; color:#6a5f4e; min-width:32px;", "类型" }
+                                        for weekly_type in weekly_types {
+                                            {subtab_button(selected_weekly_type.as_deref() == Some(weekly_type.id.as_str()), weekly_type.label.clone(), {
+                                                let ui_handle = ui;
+                                                let services = services.read().clone();
+                                                let type_id = weekly_type.id.clone();
+                                                let selected_category = selected_weekly_category.clone().unwrap_or_else(|| "0".to_string());
+                                                move |_| {
+                                                    let mut ui_handle = ui_handle;
+                                                    ui_handle.with_mut(|state| {
+                                                        state.loading = true;
+                                                        state.selected_weekly_type = Some(type_id.clone());
+                                                        state.status = "切换每周类型...".to_string();
+                                                    });
+                                                    let services = services.clone();
+                                                    let type_id = type_id.clone();
+                                                    let selected_category = selected_category.clone();
+                                                    spawn(async move {
+                                                        let result = services.get_jm_weekly(&selected_category, &type_id).await;
+                                                        ui_handle.with_mut(|state| {
+                                                            state.loading = false;
+                                                            match result {
+                                                                Ok(comics) => {
+                                                                    state.search_results = comics;
+                                                                    state.selected_comic = None;
+                                                                    state.status = format!("每周必看已切换，共 {} 项。", state.search_results.len());
+                                                                }
+                                                                Err(err) => state.status = err,
+                                                            }
+                                                        });
+                                                    });
+                                                }
+                                            })}
                                         }
-                                    })}
-                                }
-                            }
-                        }
-                        if browse_tab == BrowseTab::Weekly && !weekly_types.is_empty() {
-                            div { style: "display:flex; gap:8px; flex-wrap:wrap;",
-                                for weekly_type in weekly_types {
-                                    {subtab_button(selected_weekly_type.as_deref() == Some(weekly_type.id.as_str()), weekly_type.label.clone(), {
-                                        let ui_handle = ui;
-                                        let services = services.read().clone();
-                                        let type_id = weekly_type.id.clone();
-                                        let selected_category = selected_weekly_category.clone().unwrap_or_else(|| "0".to_string());
-                                        move |_| {
-                                            let mut ui_handle = ui_handle;
-                                            ui_handle.with_mut(|state| {
-                                                state.loading = true;
-                                                state.selected_weekly_type = Some(type_id.clone());
-                                                state.status = "切换每周类型...".to_string();
-                                            });
-                                            let services = services.clone();
-                                            let type_id = type_id.clone();
-                                            let selected_category = selected_category.clone();
-                                            spawn(async move {
-                                                let result = services.get_jm_weekly(&selected_category, &type_id).await;
-                                                ui_handle.with_mut(|state| {
-                                                    state.loading = false;
-                                                    match result {
-                                                        Ok(comics) => {
-                                                            state.search_results = comics;
-                                                            state.selected_comic = None;
-                                                            state.status = format!("每周必看已切换，共 {} 项。", state.search_results.len());
-                                                        }
-                                                        Err(err) => state.status = err,
-                                                    }
-                                                });
-                                            });
-                                        }
-                                    })}
+                                    }
                                 }
                             }
                         }
@@ -748,6 +717,27 @@ pub fn App() -> Element {
                                     option { value: "update", if matches!(ui.read().library_sort, crate::state::LibrarySort::UpdateDate) { "selected" } else { "" }, "更新日期" }
                                     option { value: "title", if matches!(ui.read().library_sort, crate::state::LibrarySort::Title) { "selected" } else { "" }, "标题" }
                                     option { value: "author", if matches!(ui.read().library_sort, crate::state::LibrarySort::Author) { "selected" } else { "" }, "作者" }
+                                }
+                                button {
+                                    style: "padding:8px 12px; border:none; border-radius:10px; background:#6b5b3d; color:white; font-weight:700; cursor:pointer;",
+                                    onclick: move |_| {
+                                        let services = services.read().clone();
+                                        let mut ui_handle = ui;
+                                        ui_handle.with_mut(|state| state.status = "正在重新扫描书架...".to_string());
+                                        spawn(async move {
+                                            match services.read_library() {
+                                                Ok(library) => {
+                                                    let count = library.len();
+                                                    ui_handle.with_mut(|state| {
+                                                        state.library = library;
+                                                        state.status = format!("书架已重新扫描，共 {} 本漫画。", count);
+                                                    });
+                                                }
+                                                Err(err) => ui_handle.with_mut(|state| state.status = err),
+                                            }
+                                        });
+                                    },
+                                    "重新扫描"
                                 }
                                 button {
                                     style: "padding:8px 12px; border:none; border-radius:10px; background:#8a6f2f; color:white; font-weight:700; cursor:pointer;",
@@ -1056,18 +1046,79 @@ pub fn App() -> Element {
             if reader_fullscreen && !reader.pages.is_empty() {
                 div {
                     style: "position:absolute; inset:0; z-index:50; background:#111; color:#f6f2e8; display:flex; flex-direction:column;",
+                    tabindex: 0,
+                    onkeydown: move |evt| {
+                        match evt.key() {
+                            Key::ArrowLeft | Key::ArrowUp => {
+                                ui.with_mut(|state| {
+                                    if state.reader.current_index > 0 {
+                                        state.reader.current_index -= 1;
+                                    }
+                                });
+                            }
+                            Key::ArrowRight | Key::ArrowDown => {
+                                ui.with_mut(|state| {
+                                    if state.reader.current_index + 1 < state.reader.pages.len() {
+                                        state.reader.current_index += 1;
+                                    }
+                                });
+                            }
+                            Key::Home => {
+                                ui.with_mut(|state| {
+                                    state.reader.current_index = 0;
+                                });
+                            }
+                            Key::End => {
+                                ui.with_mut(|state| {
+                                    state.reader.current_index = state.reader.pages.len().saturating_sub(1);
+                                });
+                            }
+                            Key::Escape => {
+                                ui.with_mut(|state| state.close_reader_fullscreen());
+                            }
+                            _ => {}
+                        }
+                    },
                     div {
                         style: "display:flex; align-items:center; gap:12px; padding:16px 20px; border-bottom:1px solid rgba(255,255,255,0.12);",
                         div { style: "font-size:16px; font-weight:800;", "{reader.title}" }
+                        div { style: "margin-left:auto; font-size:12px; color:#888;", "← → 导航 | Home End 首尾页 | Esc 退出" }
                         button {
-                            style: "margin-left:auto; padding:10px 14px; border:none; border-radius:12px; background:#f0eadc; color:#111; font-weight:700; cursor:pointer;",
+                            style: "padding:10px 14px; border:none; border-radius:12px; background:#f0eadc; color:#111; font-weight:700; cursor:pointer;",
                             onclick: move |_| ui.with_mut(|state| state.close_reader_fullscreen()),
                             "退出纯净阅读"
                         }
                     }
                     div {
-                        style: "flex:1; overflow:auto; padding:24px;",
-                        {reader_panel(reader.clone(), ui, "没有可阅读内容。", false)}
+                        style: "flex:1; display:flex; align-items:center; justify-content:center; overflow:auto; padding:24px;",
+                        img {
+                            style: "max-width:100%; max-height:100%; object-fit:contain; border-radius:8px;",
+                            src: "{reader.pages[reader.current_index]}"
+                        }
+                    }
+                    div {
+                        style: "display:flex; align-items:center; justify-content:center; gap:16px; padding:12px 20px; border-top:1px solid rgba(255,255,255,0.12);",
+                        button {
+                            style: button_style(reader.current_index > 0),
+                            disabled: reader.current_index == 0,
+                            onclick: move |_| ui.with_mut(|state| {
+                                if state.reader.current_index > 0 {
+                                    state.reader.current_index -= 1;
+                                }
+                            }),
+                            "上一页"
+                        }
+                        div { style: "font-weight:700; color:#f6f2e8;", "第 {reader.current_index + 1} / {reader.pages.len()} 页" }
+                        button {
+                            style: button_style(reader.current_index + 1 < reader.pages.len()),
+                            disabled: reader.current_index + 1 >= reader.pages.len(),
+                            onclick: move |_| ui.with_mut(|state| {
+                                if state.reader.current_index + 1 < state.reader.pages.len() {
+                                    state.reader.current_index += 1;
+                                }
+                            }),
+                            "下一页"
+                        }
                     }
                 }
             }
@@ -1617,6 +1668,36 @@ fn reader_panel(
     rsx! {
         div {
             style: "display:flex; flex-direction:column; gap:12px;",
+            tabindex: 0,
+            onkeydown: move |evt| {
+                match evt.key() {
+                    Key::ArrowLeft | Key::ArrowUp => {
+                        ui.with_mut(|state| {
+                            if state.reader.current_index > 0 {
+                                state.reader.current_index -= 1;
+                            }
+                        });
+                    }
+                    Key::ArrowRight | Key::ArrowDown => {
+                        ui.with_mut(|state| {
+                            if state.reader.current_index + 1 < state.reader.pages.len() {
+                                state.reader.current_index += 1;
+                            }
+                        });
+                    }
+                    Key::Home => {
+                        ui.with_mut(|state| {
+                            state.reader.current_index = 0;
+                        });
+                    }
+                    Key::End => {
+                        ui.with_mut(|state| {
+                            state.reader.current_index = state.reader.pages.len().saturating_sub(1);
+                        });
+                    }
+                    _ => {}
+                }
+            },
             div { style: "display:flex; align-items:center; gap:8px;",
                 button {
                     style: button_style(reader.current_index > 0),
@@ -1649,7 +1730,7 @@ fn reader_panel(
             }
             div { style: "text-align:center; color:#7a7366;", "第 {reader.current_index + 1} / {reader.pages.len()} 页" }
             img {
-                style: "width:100%; border-radius:16px; border:1px solid #ebe4d8; background:white;",
+                style: "width:100%; max-height:70vh; object-fit:contain; border-radius:16px; border:1px solid #ebe4d8; background:white;",
                 src: "{reader.pages[reader.current_index]}"
             }
         }
