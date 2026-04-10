@@ -32,6 +32,7 @@ pub struct JmPlugin {
     image_domain: String,
     album_domain: String,
     fixed_timestamp: Option<u64>,
+    download_format: String,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +77,7 @@ impl Default for JmPlugin {
             image_domain: DEFAULT_IMAGE_DOMAIN.to_string(),
             album_domain: DEFAULT_ALBUM_DOMAIN.to_string(),
             fixed_timestamp: None,
+            download_format: "webp".to_string(),
         }
     }
 }
@@ -88,6 +90,11 @@ impl JmPlugin {
 
     pub fn with_api_domain(mut self, api_domain: impl Into<String>) -> Self {
         self.api_domain = api_domain.into();
+        self
+    }
+
+    pub fn with_download_format(mut self, format: impl Into<String>) -> Self {
+        self.download_format = format.into();
         self
     }
 
@@ -410,13 +417,18 @@ impl JmPlugin {
         };
 
         let mut encoded = Vec::new();
+        let (img_format, ext) = match self.download_format.as_str() {
+            "jpg" => (ImageFormat::Jpeg, "jpg"),
+            "png" => (ImageFormat::Png, "png"),
+            _ => (ImageFormat::WebP, "webp"),
+        };
         image::DynamicImage::ImageRgb8(output)
-            .write_to(&mut std::io::Cursor::new(&mut encoded), ImageFormat::Png)
+            .write_to(&mut std::io::Cursor::new(&mut encoded), img_format)
             .map_err(|err| PluginError::Other(err.to_string()))?;
 
         Ok(ProcessedImage {
             bytes: encoded,
-            extension: "png",
+            extension: ext,
         })
     }
 

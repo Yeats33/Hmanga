@@ -29,6 +29,8 @@ pub struct LocalComicEntry {
     pub comic_dir: PathBuf,
     pub chapters: Vec<LocalChapterEntry>,
     pub platform_tag: Option<String>,
+    pub download_time: Option<u64>,
+    pub update_time: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -419,11 +421,31 @@ impl AppServices {
                 }
             }
 
+            let download_time = metadata_path
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+            let update_time = chapters
+                .iter()
+                .filter_map(|c| {
+                    c.chapter_dir
+                        .metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                })
+                .max();
+
             entries.push(LocalComicEntry {
                 comic,
                 comic_dir,
                 chapters,
                 platform_tag: platform_tag.clone(),
+                download_time,
+                update_time,
             });
         }
 
@@ -448,11 +470,31 @@ impl AppServices {
             let comic = legacy.to_comic();
             let chapters = self.legacy_chapters_from_disk(&legacy, comic_dir)?;
 
+            let download_time = metadata_path
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+            let update_time = chapters
+                .iter()
+                .filter_map(|c| {
+                    c.chapter_dir
+                        .metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                })
+                .max();
+
             entries.push(LocalComicEntry {
                 comic,
                 comic_dir: comic_dir.to_path_buf(),
                 chapters,
                 platform_tag: platform_tag.clone(),
+                download_time,
+                update_time,
             });
         }
 
@@ -608,7 +650,9 @@ fn build_jm_plugin(config: &AppConfig) -> JmPlugin {
     } else {
         config.custom_api_domain.clone()
     };
-    JmPlugin::default().with_api_domain(api_domain)
+    JmPlugin::default()
+        .with_api_domain(api_domain)
+        .with_download_format(&config.download_format)
 }
 
 fn spawn_image_task(

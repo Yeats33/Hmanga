@@ -19,6 +19,14 @@ pub enum WorkspaceTab {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LibrarySort {
+    DownloadDate,
+    UpdateDate,
+    Title,
+    Author,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DownloadPanelTab {
     Queue,
     Preview,
@@ -103,6 +111,7 @@ pub struct UiState {
     pub selected_comic: Option<Comic>,
     pub downloads: Vec<DownloadRow>,
     pub library: Vec<LocalComicEntry>,
+    pub library_sort: LibrarySort,
     pub reader: ReaderState,
     pub reader_fullscreen: bool,
 }
@@ -131,6 +140,7 @@ impl Default for UiState {
             selected_comic: None,
             downloads: Vec::new(),
             library: Vec::new(),
+            library_sort: LibrarySort::DownloadDate,
             reader: ReaderState::default(),
             reader_fullscreen: false,
         }

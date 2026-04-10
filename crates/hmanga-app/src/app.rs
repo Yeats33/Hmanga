@@ -67,6 +67,22 @@ pub fn App() -> Element {
     let selected_comic = ui.read().selected_comic.clone();
     let downloads = ui.read().downloads.clone();
     let library = ui.read().library.clone();
+    let library_sort = ui.read().library_sort;
+    let mut sorted_library = library.clone();
+    sorted_library.sort_by(|a, b| match library_sort {
+        crate::state::LibrarySort::DownloadDate => b.download_time.cmp(&a.download_time),
+        crate::state::LibrarySort::UpdateDate => b.update_time.cmp(&a.update_time),
+        crate::state::LibrarySort::Title => a
+            .comic
+            .title
+            .to_lowercase()
+            .cmp(&b.comic.title.to_lowercase()),
+        crate::state::LibrarySort::Author => a
+            .comic
+            .author
+            .to_lowercase()
+            .cmp(&b.comic.author.to_lowercase()),
+    });
     let reader = ui.read().reader.clone();
     let reader_fullscreen = ui.read().reader_fullscreen;
     let site_tab = ui.read().site_tab;
@@ -717,8 +733,24 @@ pub fn App() -> Element {
                             style: "flex:1; overflow:auto; padding:18px 20px; border-right:1px solid #d7d2c6;",
                             div { style: "display:flex; align-items:center; gap:12px; margin-bottom:14px;",
                                 h2 { style: "margin:0; font-size:16px; font-weight:800; letter-spacing:0.02em;", "本地书架" }
+                                select {
+                                    style: "margin-left:auto; padding:8px 12px; border-radius:10px; border:1px solid #d8cfbe; background:white;",
+                                    onchange: move |event| ui.with_mut(|state| {
+                                        state.library_sort = match event.value().as_str() {
+                                            "download" => crate::state::LibrarySort::DownloadDate,
+                                            "update" => crate::state::LibrarySort::UpdateDate,
+                                            "title" => crate::state::LibrarySort::Title,
+                                            "author" => crate::state::LibrarySort::Author,
+                                            _ => crate::state::LibrarySort::DownloadDate,
+                                        };
+                                    }),
+                                    option { value: "download", if matches!(ui.read().library_sort, crate::state::LibrarySort::DownloadDate) { "selected" } else { "" }, "下载日期" }
+                                    option { value: "update", if matches!(ui.read().library_sort, crate::state::LibrarySort::UpdateDate) { "selected" } else { "" }, "更新日期" }
+                                    option { value: "title", if matches!(ui.read().library_sort, crate::state::LibrarySort::Title) { "selected" } else { "" }, "标题" }
+                                    option { value: "author", if matches!(ui.read().library_sort, crate::state::LibrarySort::Author) { "selected" } else { "" }, "作者" }
+                                }
                                 button {
-                                    style: "margin-left:auto; padding:8px 12px; border:none; border-radius:10px; background:#8a6f2f; color:white; font-weight:700; cursor:pointer;",
+                                    style: "padding:8px 12px; border:none; border-radius:10px; background:#8a6f2f; color:white; font-weight:700; cursor:pointer;",
                                     onclick: move |_| {
                                         let services = services.read().clone();
                                         let mut ui_handle = ui;
@@ -749,7 +781,7 @@ pub fn App() -> Element {
                             if library.is_empty() {
                                 {empty_block("下载目录还没有漫画。")}
                             } else {
-                                for item in library {
+                                for item in sorted_library {
                                     {local_comic_card(item, Rc::new({
                                         let ui_handle = ui;
                                         move |chapter| {
@@ -826,6 +858,26 @@ pub fn App() -> Element {
                                     style: "padding:12px 14px; border-radius:12px; border:1px solid #d8cfbe; background:white;",
                                     value: "{ui.read().settings_config.export_dir.to_string_lossy()}",
                                     oninput: move |event| ui.with_mut(|state| state.settings_config.export_dir = std::path::PathBuf::from(event.value()))
+                                }
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:160px 1fr; gap:12px; align-items:center;",
+                                label { style: "font-weight:700;", "下载格式" }
+                                select {
+                                    style: "padding:12px 14px; border-radius:12px; border:1px solid #d8cfbe; background:white;",
+                                    onchange: move |event| ui.with_mut(|state| state.settings_config.download_format = event.value()),
+                                    option { value: "webp", if ui.read().settings_config.download_format == "webp" { "selected" } else { "" }, "webp" }
+                                    option { value: "jpg", if ui.read().settings_config.download_format == "jpg" { "selected" } else { "" }, "jpg" }
+                                    option { value: "png", if ui.read().settings_config.download_format == "png" { "selected" } else { "" }, "png" }
+                                }
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:160px 1fr; gap:12px; align-items:center;",
+                                label { style: "font-weight:700;", "下载封面" }
+                                input {
+                                    r#type: "checkbox",
+                                    checked: "{ui.read().settings_config.should_download_cover}",
+                                    onchange: move |event| ui.with_mut(|state| state.settings_config.should_download_cover = event.value() == "true"),
                                 }
                             }
                             div {
