@@ -15,6 +15,7 @@ path = "src/main.rs"
 hmanga-core.workspace = true
 hmanga-host.workspace = true
 hmanga-plugin-jm.workspace = true
+hmanga-plugin-wnacg.workspace = true
 dioxus.workspace = true
 dioxus-core.workspace = true
 dioxus-router.workspace = true
@@ -25,3 +26,4 @@ base64 = "0.22"
 
 [dev-dependencies]
 tempfile.workspace = true
+async-trait.workspace = true

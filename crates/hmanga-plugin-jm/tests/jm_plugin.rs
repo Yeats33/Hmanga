@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use hmanga_core::{HostApi, HttpMethod, HttpRequest, HttpResponse, LogLevel, SearchSort};
@@ -36,17 +37,18 @@ impl HostApi for FakeHost {
     fn http_request(
         &self,
         request: HttpRequest,
-    ) -> impl std::future::Future<Output = hmanga_core::PluginResult<HttpResponse>> + Send {
+    ) -> Pin<Box<dyn std::future::Future<Output = hmanga_core::PluginResult<HttpResponse>> + Send>>
+    {
         let responses = self.responses.clone();
         let requests = self.requests.clone();
-        async move {
+        Box::pin(async move {
             requests.lock().unwrap().push(request);
             responses
                 .lock()
                 .unwrap()
                 .pop_front()
                 .ok_or_else(|| hmanga_core::PluginError::Other("missing fake response".to_string()))
-        }
+        })
     }
 
     fn log(&self, _level: LogLevel, _msg: &str) {}

@@ -6,6 +6,50 @@ pub const APP_CONFIG_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct SiteConfig {
+    pub api_domain: String,
+    pub use_global_download_format: bool,
+    pub download_format: String,
+    pub use_global_cover_preference: bool,
+    pub should_download_cover: bool,
+}
+
+impl Default for SiteConfig {
+    fn default() -> Self {
+        Self {
+            api_domain: String::new(),
+            use_global_download_format: true,
+            download_format: "webp".to_string(),
+            use_global_cover_preference: true,
+            should_download_cover: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SiteConfigs {
+    pub jm: SiteConfig,
+    pub wnacg: SiteConfig,
+}
+
+impl Default for SiteConfigs {
+    fn default() -> Self {
+        Self {
+            jm: SiteConfig {
+                api_domain: "www.cdnhth.cc".to_string(),
+                ..SiteConfig::default()
+            },
+            wnacg: SiteConfig {
+                api_domain: "www.wnacg.com".to_string(),
+                ..SiteConfig::default()
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct AppConfig {
     pub version: u32,
     pub donation_unlocked: bool,
@@ -23,6 +67,7 @@ pub struct AppConfig {
     pub download_format: String,
     pub proxy: Option<String>,
     pub enabled_plugins: Vec<String>,
+    pub sites: SiteConfigs,
     pub jm_username: String,
     pub jm_password: String,
     pub theme: ThemeMode,
@@ -47,6 +92,7 @@ impl Default for AppConfig {
             download_format: "webp".to_string(),
             proxy: None,
             enabled_plugins: vec!["jm".to_string()],
+            sites: SiteConfigs::default(),
             jm_username: String::new(),
             jm_password: String::new(),
             theme: ThemeMode::Auto,

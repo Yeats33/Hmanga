@@ -1,6 +1,7 @@
 use hmanga_core::AppConfig;
 use hmanga_core::Comic;
 use hmanga_plugin_jm::JmUserProfile;
+use hmanga_plugin_wnacg::WnacgUserProfile;
 use std::path::PathBuf;
 
 use crate::service::LocalComicEntry;
@@ -9,6 +10,7 @@ use crate::service::LocalComicEntry;
 pub enum SiteTab {
     Aggregate,
     Jm,
+    Wnacg,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +39,13 @@ pub enum BrowseTab {
     Search,
     Favorites,
     Weekly,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollectionViewMode {
+    List,
+    Image,
+    SingleColumn,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,10 +103,15 @@ pub struct UiState {
     pub workspace_tab: WorkspaceTab,
     pub download_panel_tab: DownloadPanelTab,
     pub browse_tab: BrowseTab,
+    pub browse_view_mode: CollectionViewMode,
+    pub library_view_mode: CollectionViewMode,
     pub search_query: String,
     pub jm_username: String,
     pub jm_password: String,
     pub jm_profile: Option<JmUserProfile>,
+    pub wnacg_username: String,
+    pub wnacg_password: String,
+    pub wnacg_profile: Option<WnacgUserProfile>,
     pub settings_config: AppConfig,
     pub favorites_page: u32,
     pub favorites_total_pages: u32,
@@ -108,6 +122,9 @@ pub struct UiState {
     pub status: String,
     pub loading: bool,
     pub search_results: Vec<Comic>,
+    pub search_current_page: u32,
+    pub search_total_pages: u32,
+    pub search_query_text: String,
     pub selected_comic: Option<Comic>,
     pub downloads: Vec<DownloadRow>,
     pub library: Vec<LocalComicEntry>,
@@ -123,10 +140,15 @@ impl Default for UiState {
             workspace_tab: WorkspaceTab::Downloads,
             download_panel_tab: DownloadPanelTab::Queue,
             browse_tab: BrowseTab::Search,
+            browse_view_mode: CollectionViewMode::List,
+            library_view_mode: CollectionViewMode::List,
             search_query: String::new(),
             jm_username: String::new(),
             jm_password: String::new(),
             jm_profile: None,
+            wnacg_username: String::new(),
+            wnacg_password: String::new(),
+            wnacg_profile: None,
             settings_config: AppConfig::default(),
             favorites_page: 1,
             favorites_total_pages: 1,
@@ -137,6 +159,9 @@ impl Default for UiState {
             status: "输入关键词后开始搜索。".to_string(),
             loading: false,
             search_results: Vec::new(),
+            search_current_page: 1,
+            search_total_pages: 1,
+            search_query_text: String::new(),
             selected_comic: None,
             downloads: Vec::new(),
             library: Vec::new(),
@@ -155,6 +180,14 @@ impl UiState {
 
     pub fn set_browse_tab(&mut self, browse_tab: BrowseTab) {
         self.browse_tab = browse_tab;
+    }
+
+    pub fn set_browse_view_mode(&mut self, view_mode: CollectionViewMode) {
+        self.browse_view_mode = view_mode;
+    }
+
+    pub fn set_library_view_mode(&mut self, view_mode: CollectionViewMode) {
+        self.library_view_mode = view_mode;
     }
 
     pub fn close_reader_fullscreen(&mut self) {
@@ -177,6 +210,8 @@ mod tests {
         assert_eq!(state.workspace_tab, WorkspaceTab::Downloads);
         assert_eq!(state.download_panel_tab, DownloadPanelTab::Queue);
         assert_eq!(state.browse_tab, BrowseTab::Search);
+        assert_eq!(state.browse_view_mode, CollectionViewMode::List);
+        assert_eq!(state.library_view_mode, CollectionViewMode::List);
         assert!(!state.reader_fullscreen);
     }
 
@@ -203,6 +238,19 @@ mod tests {
 
         assert_eq!(state.workspace_tab, WorkspaceTab::Downloads);
         assert_eq!(state.browse_tab, BrowseTab::Favorites);
+    }
+
+    #[test]
+    fn collection_view_modes_are_toggled_independently() {
+        let mut state = UiState::default();
+
+        state.set_browse_view_mode(CollectionViewMode::Image);
+        state.set_library_view_mode(CollectionViewMode::Image);
+
+        assert_eq!(state.browse_view_mode, CollectionViewMode::Image);
+        assert_eq!(state.library_view_mode, CollectionViewMode::Image);
+        assert_eq!(state.browse_tab, BrowseTab::Search);
+        assert_eq!(state.workspace_tab, WorkspaceTab::Downloads);
     }
 
     #[test]

@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 hmanga-core.workspace = true
 aes = "0.8"
+async-trait.workspace = true
 base64 = "0.22"
 image = "0.25"
 md5 = "0.7"

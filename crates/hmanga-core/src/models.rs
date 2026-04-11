@@ -144,8 +144,23 @@ pub struct HttpRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HttpResponse {
     pub status: u16,
-    pub headers: HashMap<String, String>,
+    pub headers: HashMap<String, Vec<String>>,
     pub body: Vec<u8>,
+}
+
+impl HttpResponse {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .and_then(|values| values.first())
+            .map(String::as_str)
+    }
+
+    pub fn header_values(&self, name: &str) -> Option<&[String]> {
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(Vec::as_slice)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

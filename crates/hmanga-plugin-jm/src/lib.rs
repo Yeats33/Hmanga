@@ -2,14 +2,16 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
+
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockDecrypt, KeyInit};
 use aes::Aes256;
 use base64::Engine;
 use hmanga_core::{
-    Capabilities, ChapterInfo, Comic, FavoriteResult, HostApi, HttpMethod, HttpRequest,
-    HttpResponse, ImageUrl, PluginError, PluginMetaInfo, SearchResult, SearchSort, Session,
-    WeeklyResult,
+    Capabilities, ChapterInfo, Comic, DynPlugin, FavoriteResult, HostApi, HttpMethod, HttpRequest,
+    HttpResponse, ImageUrl, PluginError, PluginMetaInfo, PluginResult, SearchResult, SearchSort,
+    Session, WeeklyResult,
 };
 use image::ImageFormat;
 use serde::Deserialize;
@@ -117,9 +119,9 @@ impl JmPlugin {
         }
     }
 
-    pub async fn login<H: HostApi>(
+    pub async fn login(
         &self,
-        host: &H,
+        host: &dyn HostApi,
         username: &str,
         password: &str,
     ) -> Result<Session, PluginError> {
@@ -153,10 +155,7 @@ impl JmPlugin {
         })
     }
 
-    pub async fn get_user_profile<H: HostApi>(
-        &self,
-        host: &H,
-    ) -> Result<JmUserProfile, PluginError> {
+    pub async fn get_user_profile(&self, host: &dyn HostApi) -> Result<JmUserProfile, PluginError> {
         let timestamp = self.timestamp();
         let request = self.build_signed_post("/login", &[], &[], timestamp, false);
         let response = host.http_request(request).await?;
@@ -167,9 +166,9 @@ impl JmPlugin {
         Ok(self.map_user_profile(profile))
     }
 
-    pub async fn get_favorites<H: HostApi>(
+    pub async fn get_favorites(
         &self,
-        host: &H,
+        host: &dyn HostApi,
         folder_id: i64,
         page: u32,
     ) -> Result<FavoriteResult, PluginError> {
@@ -207,7 +206,7 @@ impl JmPlugin {
         })
     }
 
-    pub async fn get_weekly_info<H: HostApi>(&self, host: &H) -> Result<JmWeeklyInfo, PluginError> {
+    pub async fn get_weekly_info(&self, host: &dyn HostApi) -> Result<JmWeeklyInfo, PluginError> {
         let timestamp = self.timestamp();
         let request = self.build_signed_get("/week", &[], timestamp, false);
         let response = host.http_request(request).await?;
@@ -236,9 +235,9 @@ impl JmPlugin {
         })
     }
 
-    pub async fn get_weekly<H: HostApi>(
+    pub async fn get_weekly(
         &self,
-        host: &H,
+        host: &dyn HostApi,
         category_id: &str,
         type_id: &str,
     ) -> Result<WeeklyResult, PluginError> {
@@ -281,9 +280,9 @@ impl JmPlugin {
         })
     }
 
-    pub async fn search<H: HostApi>(
+    pub async fn search(
         &self,
-        host: &H,
+        host: &dyn HostApi,
         keyword: &str,
         page: u32,
         sort: SearchSort,
@@ -327,9 +326,9 @@ impl JmPlugin {
         })
     }
 
-    pub async fn get_comic<H: HostApi>(
+    pub async fn get_comic(
         &self,
-        host: &H,
+        host: &dyn HostApi,
         comic_id: &str,
     ) -> Result<Comic, PluginError> {
         let timestamp = self.timestamp();
@@ -342,9 +341,9 @@ impl JmPlugin {
         Ok(self.map_comic(comic))
     }
 
-    pub async fn get_chapter_images<H: HostApi>(
+    pub async fn get_chapter_images(
         &self,
-        host: &H,
+        host: &dyn HostApi,
         chapter_id: &str,
     ) -> Result<Vec<ImageUrl>, PluginError> {
         let timestamp = self.timestamp();
@@ -447,11 +446,12 @@ impl JmPlugin {
         extra.insert("update_at".to_string(), comic.update_at.to_string());
 
         Comic {
-            id: comic.id,
+            id: comic.id.clone(),
             source: plugin_id().to_string(),
             title: comic.name,
             author: comic.author,
-            cover_url: self.normalize_cover_url(Some(&comic.image), None),
+            // Use comic_id to generate cover URL, same as map_comic
+            cover_url: comic.id.parse::<i64>().map(|id| self.normalize_cover_url(None, Some(id))).unwrap_or_default(),
             description: String::new(),
             tags,
             chapters: Vec::new(),
@@ -775,6 +775,71 @@ impl JmPlugin {
 
     fn normalize_user_photo(&self, photo: &str) -> String {
         format!("https://{}/media/users/{}", self.image_domain, photo)
+    }
+}
+
+#[async_trait]
+impl DynPlugin for JmPlugin {
+    fn id(&self) -> &str {
+        plugin_id()
+    }
+
+    fn meta(&self) -> PluginMetaInfo {
+        self.meta()
+    }
+
+    async fn search(
+        &self,
+        host: &dyn HostApi,
+        query: &str,
+        page: u32,
+        sort: SearchSort,
+    ) -> PluginResult<SearchResult> {
+        self.search(host, query, page, sort).await
+    }
+
+    async fn get_comic(&self, host: &dyn HostApi, comic_id: &str) -> PluginResult<Comic> {
+        self.get_comic(host, comic_id).await
+    }
+
+    async fn get_chapter_images(
+        &self,
+        host: &dyn HostApi,
+        chapter_id: &str,
+    ) -> PluginResult<Vec<ImageUrl>> {
+        self.get_chapter_images(host, chapter_id).await
+    }
+
+    async fn login(
+        &self,
+        host: &dyn HostApi,
+        username: &str,
+        password: &str,
+    ) -> PluginResult<Session> {
+        self.login(host, username, password).await
+    }
+
+    async fn get_favorites(
+        &self,
+        host: &dyn HostApi,
+        _session: Option<&Session>,
+        page: u32,
+    ) -> PluginResult<FavoriteResult> {
+        self.get_favorites(host, 0, page).await
+    }
+
+    async fn get_weekly(&self, host: &dyn HostApi) -> PluginResult<WeeklyResult> {
+        let info = self.get_weekly_info(host).await?;
+        let first_category = info
+            .categories
+            .first()
+            .ok_or_else(|| PluginError::Other("no weekly categories".to_string()))?;
+        let first_type = info
+            .types
+            .first()
+            .ok_or_else(|| PluginError::Other("no weekly types".to_string()))?;
+        self.get_weekly(host, &first_category.id, &first_type.id)
+            .await
     }
 }
 

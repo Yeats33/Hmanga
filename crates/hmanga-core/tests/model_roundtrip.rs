@@ -30,6 +30,18 @@ fn app_config_defaults_to_donation_locked() {
 }
 
 #[test]
+fn app_config_defaults_include_per_site_settings() {
+    let config = AppConfig::default();
+
+    assert_eq!(config.sites.jm.api_domain, "www.cdnhth.cc");
+    assert_eq!(config.sites.wnacg.api_domain, "www.wnacg.com");
+    assert!(config.sites.jm.use_global_download_format);
+    assert!(config.sites.wnacg.use_global_download_format);
+    assert!(config.sites.jm.use_global_cover_preference);
+    assert!(config.sites.wnacg.use_global_cover_preference);
+}
+
+#[test]
 fn download_history_roundtrips_with_pending_task() {
     let comic = Comic {
         id: "comic-1".to_string(),

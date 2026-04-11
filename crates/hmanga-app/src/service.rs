@@ -6,9 +6,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
-use hmanga_core::{download::ExportRunner, AppConfig, Comic, HostApi, HttpMethod, HttpRequest};
+use hmanga_core::{
+    download::ExportRunner, AppConfig, Comic, DynPlugin, HostApi, HttpMethod, HttpRequest,
+    HttpResponse, SiteConfig,
+};
 use hmanga_host::HostRuntime;
 use hmanga_plugin_jm::{JmPlugin, JmUserProfile, JmWeeklyInfo, ProcessedImage};
+use hmanga_plugin_wnacg::{WnacgPlugin, WnacgUserProfile};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
@@ -40,10 +44,20 @@ pub struct FavoritePage {
     pub total_pages: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchPage {
+    pub comics: Vec<Comic>,
+    pub current_page: u32,
+    pub total_pages: u32,
+}
+
 #[derive(Clone)]
 pub struct AppServices {
     host: Arc<Mutex<HostRuntime>>,
     jm: Arc<Mutex<JmPlugin>>,
+    wnacg: Arc<Mutex<WnacgPlugin>>,
+    wnacg_session: Arc<Mutex<Option<hmanga_core::Session>>>,
+    plugins: Arc<Mutex<HashMap<String, Arc<dyn DynPlugin>>>>,
     config: Arc<Mutex<AppConfig>>,
     config_path: PathBuf,
     chapter_gate: Arc<Mutex<Arc<Semaphore>>>,
@@ -74,6 +88,9 @@ impl AppServices {
         Ok(Self {
             host: Arc::new(Mutex::new(build_host_runtime(&config)?)),
             jm: Arc::new(Mutex::new(build_jm_plugin(&config))),
+            wnacg: Arc::new(Mutex::new(build_wnacg_plugin(&config))),
+            wnacg_session: Arc::new(Mutex::new(None)),
+            plugins: Arc::new(Mutex::new(build_plugin_registry(&config))),
             config: Arc::new(Mutex::new(config)),
             config_path,
             chapter_gate: Arc::new(Mutex::new(Arc::new(Semaphore::new(chapter_concurrency)))),
@@ -97,6 +114,10 @@ impl AppServices {
         self.jm.lock().unwrap().clone()
     }
 
+    fn wnacg(&self) -> WnacgPlugin {
+        self.wnacg.lock().unwrap().clone()
+    }
+
     pub fn save_jm_credentials(&self, username: &str, password: &str) -> Result<(), String> {
         let mut config = self.config();
         config.jm_username = username.to_string();
@@ -111,21 +132,128 @@ impl AppServices {
         *self.config.lock().unwrap() = config.clone();
         *self.host.lock().unwrap() = build_host_runtime(config)?;
         *self.jm.lock().unwrap() = build_jm_plugin(config);
+        *self.wnacg.lock().unwrap() = build_wnacg_plugin(config);
+        *self.plugins.lock().unwrap() = build_plugin_registry(config);
         *self.chapter_gate.lock().unwrap() =
             Arc::new(Semaphore::new(config.chapter_concurrency.max(1)));
         Ok(())
     }
 
-    pub async fn search_aggregate(&self, query: &str) -> Result<Vec<Comic>, String> {
-        self.search_jm(query).await
+    pub async fn search_aggregate(&self, query: &str) -> Result<SearchPage, String> {
+        let enabled_plugins = self.config().enabled_plugins;
+        let plugins = self.plugins.lock().unwrap().clone();
+        let host = self.host();
+        search_aggregate_plugins(&plugins, &host, &enabled_plugins, query, 1).await
     }
 
-    pub async fn search_jm(&self, query: &str) -> Result<Vec<Comic>, String> {
+    pub async fn search_aggregate_page(&self, query: &str, page: u32) -> Result<SearchPage, String> {
+        let enabled_plugins = self.config().enabled_plugins;
+        let plugins = self.plugins.lock().unwrap().clone();
+        let host = self.host();
+        search_aggregate_plugins(&plugins, &host, &enabled_plugins, query, page).await
+    }
+
+    pub async fn search_wnacg(&self, query: &str) -> Result<SearchPage, String> {
+        let wnacg = self.wnacg();
+        let host = self.host();
+        wnacg
+            .search(&host, query, 1, hmanga_core::SearchSort::Latest)
+            .await
+            .map(|result| SearchPage {
+                comics: result.comics,
+                current_page: result.current_page,
+                total_pages: result.total_pages,
+            })
+            .map_err(|err| err.to_string())
+    }
+
+    pub async fn search_wnacg_page(&self, query: &str, page: u32) -> Result<SearchPage, String> {
+        let wnacg = self.wnacg();
+        let host = self.host();
+        wnacg
+            .search(&host, query, page, hmanga_core::SearchSort::Latest)
+            .await
+            .map(|result| SearchPage {
+                comics: result.comics,
+                current_page: result.current_page,
+                total_pages: result.total_pages,
+            })
+            .map_err(|err| err.to_string())
+    }
+
+    pub async fn load_wnacg_comic(&self, comic_id: &str) -> Result<Comic, String> {
+        let wnacg = self.wnacg();
+        let host = self.host();
+        wnacg
+            .get_comic(&host, comic_id)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    pub async fn login_wnacg(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<WnacgUserProfile, String> {
+        let wnacg = self.wnacg();
+        let host = self.host();
+        let session = wnacg
+            .login(&host, username, password)
+            .await
+            .map_err(|err| err.to_string())?;
+        *self.wnacg_session.lock().unwrap() = Some(session.clone());
+        let wnacg = self.wnacg();
+        let host = self.host();
+        wnacg
+            .get_user_profile(&host, &session)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    #[allow(dead_code)]
+    pub async fn get_wnacg_favorites_page(
+        &self,
+        folder_id: i64,
+        page: u32,
+    ) -> Result<FavoritePage, String> {
+        let session = self.wnacg_session.lock().unwrap().clone();
+        let session = session.ok_or_else(|| "未登录wnacg".to_string())?;
+        let wnacg = self.wnacg();
+        let host = self.host();
+        wnacg
+            .get_favorites(&host, &session, folder_id, page)
+            .await
+            .map(|result| FavoritePage {
+                comics: result.comics,
+                current_page: result.current_page,
+                total_pages: result.total_pages,
+            })
+            .map_err(|err| err.to_string())
+    }
+
+    pub async fn search_jm(&self, query: &str) -> Result<SearchPage, String> {
         let jm = self.jm();
         let host = self.host();
         jm.search(&host, query, 1, hmanga_core::SearchSort::Latest)
             .await
-            .map(|result| result.comics)
+            .map(|result| SearchPage {
+                comics: result.comics,
+                current_page: result.current_page,
+                total_pages: result.total_pages,
+            })
+            .map_err(|err| err.to_string())
+    }
+
+    pub async fn search_jm_page(&self, query: &str, page: u32) -> Result<SearchPage, String> {
+        let jm = self.jm();
+        let host = self.host();
+        jm.search(&host, query, page, hmanga_core::SearchSort::Latest)
+            .await
+            .map(|result| SearchPage {
+                comics: result.comics,
+                current_page: result.current_page,
+                total_pages: result.total_pages,
+            })
             .map_err(|err| err.to_string())
     }
 
@@ -135,6 +263,28 @@ impl AppServices {
         jm.get_comic(&host, comic_id)
             .await
             .map_err(|err| err.to_string())
+    }
+
+    pub async fn load_comic(&self, source: &str, comic_id: &str) -> Result<Comic, String> {
+        match source {
+            "wnacg" => self.load_wnacg_comic(comic_id).await,
+            _ => self.load_jm_comic(comic_id).await,
+        }
+    }
+
+    pub async fn read_chapter_online(
+        &self,
+        source: &str,
+        chapter: &hmanga_core::ChapterInfo,
+        mut on_progress: impl FnMut(u32, u32, &str),
+    ) -> Result<Vec<String>, String> {
+        match source {
+            "wnacg" => {
+                self.read_wnacg_chapter_online(chapter, &mut on_progress)
+                    .await
+            }
+            _ => self.read_jm_chapter_online(chapter, &mut on_progress).await,
+        }
     }
 
     pub async fn login_jm(&self, username: &str, password: &str) -> Result<JmUserProfile, String> {
@@ -182,6 +332,116 @@ impl AppServices {
             .await
             .map(|result| result.comics)
             .map_err(|err| err.to_string())
+    }
+
+    async fn read_jm_chapter_online(
+        &self,
+        chapter: &hmanga_core::ChapterInfo,
+        on_progress: &mut impl FnMut(u32, u32, &str),
+    ) -> Result<Vec<String>, String> {
+        let config = self.config();
+        let host = self.host();
+        let jm = self.jm();
+        let images = jm
+            .get_chapter_images(&host, &chapter.id)
+            .await
+            .map_err(|err| err.to_string())?;
+        if images.is_empty() {
+            return Err("章节没有可用图片。".to_string());
+        }
+
+        let image_concurrency = config.image_concurrency.max(1);
+        let total_pages = images.len() as u32;
+        let mut pages = vec![String::new(); images.len()];
+        let mut next_to_spawn = 0usize;
+        let mut completed = 0u32;
+        let mut join_set = JoinSet::new();
+
+        while next_to_spawn < image_concurrency.min(images.len()) {
+            let image = images[next_to_spawn].clone();
+            spawn_jm_reader_task(
+                &mut join_set,
+                host.clone(),
+                jm.clone(),
+                image,
+                next_to_spawn,
+            );
+            next_to_spawn += 1;
+        }
+
+        while let Some(joined) = join_set.join_next().await {
+            let (index, current_name, page_src) = joined.map_err(|err| err.to_string())??;
+            pages[index] = page_src;
+            completed += 1;
+            on_progress(completed, total_pages, &current_name);
+
+            if config.image_download_interval_sec > 0 {
+                sleep(Duration::from_secs(config.image_download_interval_sec)).await;
+            }
+
+            if next_to_spawn < images.len() {
+                let image = images[next_to_spawn].clone();
+                spawn_jm_reader_task(
+                    &mut join_set,
+                    host.clone(),
+                    jm.clone(),
+                    image,
+                    next_to_spawn,
+                );
+                next_to_spawn += 1;
+            }
+        }
+
+        Ok(pages)
+    }
+
+    async fn read_wnacg_chapter_online(
+        &self,
+        chapter: &hmanga_core::ChapterInfo,
+        on_progress: &mut impl FnMut(u32, u32, &str),
+    ) -> Result<Vec<String>, String> {
+        let config = self.config();
+        let host = self.host();
+        let wnacg = self.wnacg();
+        let images = wnacg
+            .get_chapter_images(&host, &chapter.id)
+            .await
+            .map_err(|err| err.to_string())?;
+        if images.is_empty() {
+            return Err("章节没有可用图片。".to_string());
+        }
+
+        let image_concurrency = config.image_concurrency.max(1);
+        let total_pages = images.len() as u32;
+        let mut pages = vec![String::new(); images.len()];
+        let mut next_to_spawn = 0usize;
+        let mut completed = 0u32;
+        let mut join_set = JoinSet::new();
+
+        while next_to_spawn < image_concurrency.min(images.len()) {
+            let image = images[next_to_spawn].clone();
+            spawn_passthrough_reader_task(&mut join_set, host.clone(), image, next_to_spawn);
+            next_to_spawn += 1;
+        }
+
+        while let Some(joined) = join_set.join_next().await {
+            let (index, current_name, page_src) = joined.map_err(|err| err.to_string())??;
+            pages[index] = page_src;
+            completed += 1;
+            on_progress(completed, total_pages, &current_name);
+
+            if config.image_download_interval_sec > 0 {
+                sleep(Duration::from_secs(config.image_download_interval_sec)).await;
+            }
+
+            if next_to_spawn < images.len() {
+                let image = images[next_to_spawn].clone();
+                spawn_passthrough_reader_task(&mut join_set, host.clone(), image, next_to_spawn);
+                next_to_spawn += 1;
+            }
+        }
+
+        Ok(pages)
     }
 
     pub async fn download_jm_chapter(
@@ -601,12 +861,45 @@ pub fn to_browser_src(path: &Path) -> String {
     };
 
     match fs::read(path) {
-        Ok(bytes) => {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-            format!("data:{mime};base64,{encoded}")
-        }
+        Ok(bytes) => bytes_to_data_url(&bytes, mime),
         Err(_) => String::new(),
     }
+}
+
+fn bytes_to_data_url(bytes: &[u8], mime: &str) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    format!("data:{mime};base64,{encoded}")
+}
+
+fn mime_from_extension(extension: &str) -> &'static str {
+    match extension.to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    }
+}
+
+fn response_mime(response: &HttpResponse, url: &str) -> String {
+    response
+        .header("content-type")
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let extension = url
+                .split('?')
+                .next()
+                .and_then(|value| value.rsplit('.').next())
+                .unwrap_or_default();
+            mime_from_extension(extension).to_string()
+        })
+}
+
+fn remote_image_to_data_url(response: &HttpResponse, url: &str) -> String {
+    bytes_to_data_url(&response.body, &response_mime(response, url))
 }
 
 fn sanitize_filename(value: &str) -> String {
@@ -645,14 +938,92 @@ fn build_host_runtime(config: &AppConfig) -> Result<HostRuntime, String> {
 }
 
 fn build_jm_plugin(config: &AppConfig) -> JmPlugin {
-    let api_domain = if config.custom_api_domain.trim().is_empty() {
-        config.api_domain.clone()
-    } else {
-        config.custom_api_domain.clone()
-    };
+    let api_domain = resolve_jm_api_domain(config);
     JmPlugin::default()
         .with_api_domain(api_domain)
-        .with_download_format(&config.download_format)
+        .with_download_format(resolve_site_download_format(config, &config.sites.jm))
+}
+
+fn build_wnacg_plugin(config: &AppConfig) -> WnacgPlugin {
+    WnacgPlugin::default()
+        .with_api_domain(resolve_site_api_domain(&config.sites.wnacg))
+        .with_download_format(resolve_site_download_format(config, &config.sites.wnacg))
+}
+
+fn build_plugin_registry(config: &AppConfig) -> HashMap<String, Arc<dyn DynPlugin>> {
+    let mut plugins: HashMap<String, Arc<dyn DynPlugin>> = HashMap::new();
+    plugins.insert(
+        "jm".to_string(),
+        Arc::new(build_jm_plugin(config)) as Arc<dyn DynPlugin>,
+    );
+    plugins.insert(
+        "wnacg".to_string(),
+        Arc::new(build_wnacg_plugin(config)) as Arc<dyn DynPlugin>,
+    );
+    plugins
+}
+
+async fn search_aggregate_plugins(
+    plugins: &HashMap<String, Arc<dyn DynPlugin>>,
+    host: &dyn HostApi,
+    enabled_plugins: &[String],
+    query: &str,
+    page: u32,
+) -> Result<SearchPage, String> {
+    let mut all_comics = Vec::new();
+    let mut total_pages = 1u32;
+    for plugin_id in enabled_plugins {
+        let Some(plugin) = plugins.get(plugin_id) else {
+            continue;
+        };
+        let result = plugin
+            .search(host, query, page, hmanga_core::SearchSort::Latest)
+            .await
+            .map_err(|err| err.to_string())?;
+        total_pages = total_pages.max(result.total_pages);
+        all_comics.extend(result.comics);
+    }
+    Ok(SearchPage {
+        comics: all_comics,
+        current_page: page,
+        total_pages,
+    })
+}
+
+fn resolve_jm_api_domain(config: &AppConfig) -> String {
+    let site_domain = resolve_site_api_domain(&config.sites.jm);
+    if site_domain == "www.cdnhth.cc"
+        && (config.api_domain != "www.cdnhth.cc" || !config.custom_api_domain.trim().is_empty())
+    {
+        if config.custom_api_domain.trim().is_empty() {
+            config.api_domain.clone()
+        } else {
+            config.custom_api_domain.clone()
+        }
+    } else {
+        site_domain
+    }
+}
+
+fn resolve_site_api_domain(site: &SiteConfig) -> String {
+    site.api_domain.trim().to_string()
+}
+
+fn resolve_site_download_format<'a>(config: &'a AppConfig, site: &'a SiteConfig) -> &'a str {
+    if site.use_global_download_format {
+        &config.download_format
+    } else {
+        &site.download_format
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn resolve_site_cover_preference(config: &AppConfig, site: &SiteConfig) -> bool {
+    if site.use_global_cover_preference {
+        config.should_download_cover
+    } else {
+        site.should_download_cover
+    }
 }
 
 fn spawn_image_task(
@@ -688,6 +1059,72 @@ fn spawn_image_task(
     });
 }
 
+fn spawn_jm_reader_task(
+    join_set: &mut JoinSet<Result<(usize, String, String), String>>,
+    host: HostRuntime,
+    jm: JmPlugin,
+    image: hmanga_core::ImageUrl,
+    index: usize,
+) {
+    join_set.spawn(async move {
+        let current_name = image
+            .headers
+            .get("x-hmanga-jm-file-name")
+            .cloned()
+            .unwrap_or_else(|| format!("{:04}", index + 1));
+        let response = host
+            .http_request(HttpRequest {
+                url: image.url.clone(),
+                method: HttpMethod::Get,
+                headers: HashMap::new(),
+                body: None,
+            })
+            .await
+            .map_err(|err| err.to_string())?;
+        if response.status != 200 {
+            return Err(format!("载入图片失败: {}", response.status));
+        }
+
+        let processed = jm
+            .process_image(&image, response.body)
+            .map_err(|err| err.to_string())?;
+        let page_src =
+            bytes_to_data_url(&processed.bytes, mime_from_extension(processed.extension));
+        Ok((index, current_name, page_src))
+    });
+}
+
+fn spawn_passthrough_reader_task(
+    join_set: &mut JoinSet<Result<(usize, String, String), String>>,
+    host: HostRuntime,
+    image: hmanga_core::ImageUrl,
+    index: usize,
+) {
+    join_set.spawn(async move {
+        let current_name = image
+            .url
+            .rsplit('/')
+            .next()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{:04}", index + 1));
+        let response = host
+            .http_request(HttpRequest {
+                url: image.url.clone(),
+                method: HttpMethod::Get,
+                headers: image.headers.clone(),
+                body: None,
+            })
+            .await
+            .map_err(|err| err.to_string())?;
+        if response.status != 200 {
+            return Err(format!("载入图片失败: {}", response.status));
+        }
+
+        let page_src = remote_image_to_data_url(&response, &image.url);
+        Ok((index, current_name, page_src))
+    });
+}
+
 fn resolve_config_dir() -> PathBuf {
     if let Ok(path) = std::env::var("HMANGA_CONFIG_DIR") {
         return PathBuf::from(path);
@@ -709,6 +1146,7 @@ fn load_or_init_config(
             &fs::read_to_string(config_path).map_err(|err| err.to_string())?,
         )
         .map_err(|err| err.to_string())?;
+        migrate_legacy_site_settings(&mut config);
         if config.export_dir.as_os_str().is_empty() || config.export_dir == Path::new("Exports") {
             config.export_dir = config.download_dir.join("_exports");
         }
@@ -731,6 +1169,21 @@ fn persist_config(config_path: &Path, config: &AppConfig) -> Result<(), String> 
         serde_json::to_string_pretty(config).map_err(|err| err.to_string())?,
     )
     .map_err(|err| err.to_string())
+}
+
+fn migrate_legacy_site_settings(config: &mut AppConfig) {
+    let legacy_jm_api_domain = if config.custom_api_domain.trim().is_empty() {
+        config.api_domain.trim()
+    } else {
+        config.custom_api_domain.trim()
+    };
+
+    if config.sites.jm.api_domain == "www.cdnhth.cc"
+        && !legacy_jm_api_domain.is_empty()
+        && legacy_jm_api_domain != "www.cdnhth.cc"
+    {
+        config.sites.jm.api_domain = legacy_jm_api_domain.to_string();
+    }
 }
 
 fn collect_named_files(
@@ -825,7 +1278,136 @@ fn known_platform_subdirs() -> [(&'static str, &'static str); 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use hmanga_core::{
+        Capabilities, FavoriteResult, HttpRequest, HttpResponse, ImageUrl, LogLevel, PluginError,
+        PluginMetaInfo, SearchResult, SearchSort, Session, WeeklyResult,
+    };
+    use std::pin::Pin;
     use tempfile::TempDir;
+
+    #[derive(Default)]
+    struct NoopHost;
+
+    impl HostApi for NoopHost {
+        fn http_request(
+            &self,
+            _request: HttpRequest,
+        ) -> Pin<
+            Box<dyn std::future::Future<Output = hmanga_core::PluginResult<HttpResponse>> + Send>,
+        > {
+            Box::pin(async { Err(PluginError::Other("unused".to_string())) })
+        }
+
+        fn log(&self, _level: LogLevel, _message: &str) {}
+    }
+
+    #[derive(Clone)]
+    struct FakePlugin {
+        id: String,
+        comics: Vec<Comic>,
+    }
+
+    impl FakePlugin {
+        fn new(id: &str, titles: &[&str]) -> Self {
+            Self {
+                id: id.to_string(),
+                comics: titles
+                    .iter()
+                    .enumerate()
+                    .map(|(index, title)| Comic {
+                        id: format!("{id}-{index}"),
+                        source: id.to_string(),
+                        title: (*title).to_string(),
+                        author: String::new(),
+                        cover_url: String::new(),
+                        description: String::new(),
+                        tags: Vec::new(),
+                        chapters: Vec::new(),
+                        extra: HashMap::new(),
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DynPlugin for FakePlugin {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn meta(&self) -> PluginMetaInfo {
+            PluginMetaInfo {
+                id: self.id.clone(),
+                name: self.id.clone(),
+                version: "test".to_string(),
+                sdk_version: 1,
+                icon: Vec::new(),
+                description: "test".to_string(),
+                capabilities: Capabilities {
+                    search: true,
+                    login: false,
+                    favorites: false,
+                    ranking: false,
+                    weekly: false,
+                    tags_browsing: false,
+                },
+            }
+        }
+
+        async fn search(
+            &self,
+            _host: &dyn HostApi,
+            _query: &str,
+            _page: u32,
+            _sort: SearchSort,
+        ) -> hmanga_core::PluginResult<SearchResult> {
+            Ok(SearchResult {
+                comics: self.comics.clone(),
+                current_page: 1,
+                total_pages: 1,
+            })
+        }
+
+        async fn get_comic(
+            &self,
+            _host: &dyn HostApi,
+            _comic_id: &str,
+        ) -> hmanga_core::PluginResult<Comic> {
+            Err(PluginError::NotSupported)
+        }
+
+        async fn get_chapter_images(
+            &self,
+            _host: &dyn HostApi,
+            _chapter_id: &str,
+        ) -> hmanga_core::PluginResult<Vec<ImageUrl>> {
+            Err(PluginError::NotSupported)
+        }
+
+        async fn login(
+            &self,
+            _host: &dyn HostApi,
+            _username: &str,
+            _password: &str,
+        ) -> hmanga_core::PluginResult<Session> {
+            Err(PluginError::NotSupported)
+        }
+
+        async fn get_favorites(
+            &self,
+            _host: &dyn HostApi,
+            _session: Option<&Session>,
+            _page: u32,
+        ) -> hmanga_core::PluginResult<FavoriteResult> {
+            Err(PluginError::NotSupported)
+        }
+
+        async fn get_weekly(&self, _host: &dyn HostApi) -> hmanga_core::PluginResult<WeeklyResult> {
+            Err(PluginError::NotSupported)
+        }
+    }
 
     #[test]
     fn initializes_and_persists_config_file_with_download_dir() {
@@ -903,6 +1485,33 @@ mod tests {
         fs::write(&image_path, b"png-bytes").unwrap();
 
         let src = to_browser_src(&image_path);
+
+        assert!(src.starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn response_mime_prefers_http_header() {
+        let response = HttpResponse {
+            status: 200,
+            headers: HashMap::from([("content-type".to_string(), vec!["image/webp".to_string()])]),
+            body: b"img".to_vec(),
+        };
+
+        assert_eq!(
+            response_mime(&response, "https://example.com/image.jpg"),
+            "image/webp"
+        );
+    }
+
+    #[test]
+    fn remote_image_to_data_url_falls_back_to_url_extension() {
+        let response = HttpResponse {
+            status: 200,
+            headers: HashMap::new(),
+            body: b"png-bytes".to_vec(),
+        };
+
+        let src = remote_image_to_data_url(&response, "https://example.com/cover.png");
 
         assert!(src.starts_with("data:image/png;base64,"));
     }
@@ -1112,5 +1721,145 @@ mod tests {
 
         assert_eq!(comic_dir, root.join("漫画：A 测试"));
         assert_eq!(chapter_dir, root.join("漫画：A 测试").join("第1话 特别篇"));
+    }
+
+    #[test]
+    fn loading_existing_config_migrates_legacy_jm_domain_into_site_settings() {
+        let config_dir = TempDir::new().unwrap();
+        let download_dir = TempDir::new().unwrap();
+        fs::write(
+            config_dir.path().join("config.json"),
+            format!(
+                r#"{{
+                  "version": 1,
+                  "donation_unlocked": false,
+                  "download_dir": "{}",
+                  "export_dir": "{}",
+                  "chapter_concurrency": 3,
+                  "chapter_download_interval_sec": 0,
+                  "image_concurrency": 5,
+                  "image_download_interval_sec": 0,
+                  "download_all_favorites_interval_sec": 0,
+                  "update_downloaded_comics_interval_sec": 0,
+                  "api_domain": "legacy.jm.example",
+                  "custom_api_domain": "",
+                  "should_download_cover": true,
+                  "download_format": "webp",
+                  "proxy": null,
+                  "enabled_plugins": ["jm"],
+                  "jm_username": "",
+                  "jm_password": "",
+                  "theme": "Auto"
+                }}"#,
+                download_dir.path().display(),
+                download_dir.path().join("_exports").display()
+            ),
+        )
+        .unwrap();
+
+        let services = AppServices::new_with_paths(
+            config_dir.path().to_path_buf(),
+            download_dir.path().to_path_buf(),
+        )
+        .unwrap();
+
+        assert_eq!(services.config().sites.jm.api_domain, "legacy.jm.example");
+    }
+
+    #[test]
+    fn jm_site_settings_can_override_global_defaults() {
+        let mut config = AppConfig {
+            download_format: "webp".to_string(),
+            should_download_cover: true,
+            ..AppConfig::default()
+        };
+        config.sites.jm.api_domain = "jm.example".to_string();
+        config.sites.jm.use_global_download_format = false;
+        config.sites.jm.download_format = "png".to_string();
+        config.sites.jm.use_global_cover_preference = false;
+        config.sites.jm.should_download_cover = false;
+
+        assert_eq!(resolve_site_api_domain(&config.sites.jm), "jm.example");
+        assert_eq!(
+            resolve_site_download_format(&config, &config.sites.jm),
+            "png"
+        );
+        assert!(!resolve_site_cover_preference(&config, &config.sites.jm));
+    }
+
+    #[test]
+    fn wnacg_site_settings_can_follow_global_defaults() {
+        let mut config = AppConfig {
+            download_format: "jpg".to_string(),
+            should_download_cover: false,
+            ..AppConfig::default()
+        };
+        config.sites.wnacg.api_domain = "wnacg.example".to_string();
+        config.sites.wnacg.use_global_download_format = true;
+        config.sites.wnacg.download_format = "png".to_string();
+        config.sites.wnacg.use_global_cover_preference = true;
+        config.sites.wnacg.should_download_cover = true;
+
+        assert_eq!(
+            resolve_site_api_domain(&config.sites.wnacg),
+            "wnacg.example"
+        );
+        assert_eq!(
+            resolve_site_download_format(&config, &config.sites.wnacg),
+            "jpg"
+        );
+        assert!(!resolve_site_cover_preference(&config, &config.sites.wnacg));
+    }
+
+    #[tokio::test]
+    async fn aggregate_search_combines_results_in_enabled_plugin_order() {
+        let host = NoopHost;
+        let plugins: HashMap<String, Arc<dyn DynPlugin>> = HashMap::from([
+            (
+                "jm".to_string(),
+                Arc::new(FakePlugin::new("jm", &["JM-A"])) as Arc<dyn DynPlugin>,
+            ),
+            (
+                "wnacg".to_string(),
+                Arc::new(FakePlugin::new("wnacg", &["WN-1", "WN-2"])) as Arc<dyn DynPlugin>,
+            ),
+        ]);
+
+        let comics = search_aggregate_plugins(
+            &plugins,
+            &host,
+            &["wnacg".to_string(), "jm".to_string()],
+            "demo",
+            1,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(comics.comics.len(), 3);
+        assert_eq!(comics.comics[0].source, "wnacg");
+        assert_eq!(comics.comics[1].source, "wnacg");
+        assert_eq!(comics.comics[2].source, "jm");
+    }
+
+    #[tokio::test]
+    async fn aggregate_search_skips_plugins_not_enabled_in_config() {
+        let host = NoopHost;
+        let plugins: HashMap<String, Arc<dyn DynPlugin>> = HashMap::from([
+            (
+                "jm".to_string(),
+                Arc::new(FakePlugin::new("jm", &["JM-A"])) as Arc<dyn DynPlugin>,
+            ),
+            (
+                "wnacg".to_string(),
+                Arc::new(FakePlugin::new("wnacg", &["WN-1"])) as Arc<dyn DynPlugin>,
+            ),
+        ]);
+
+        let comics = search_aggregate_plugins(&plugins, &host, &["jm".to_string()], "demo", 1)
+            .await
+            .unwrap();
+
+        assert_eq!(comics.comics.len(), 1);
+        assert_eq!(comics.comics[0].source, "jm");
     }
 }

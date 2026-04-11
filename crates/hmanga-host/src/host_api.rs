@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::pin::Pin;
 
 use hmanga_core::{HostApi, HttpMethod, HttpRequest, HttpResponse, LogLevel, PluginError};
 use reqwest::Client;
@@ -34,9 +35,9 @@ impl HostApi for HostRuntime {
     fn http_request(
         &self,
         request: HttpRequest,
-    ) -> impl std::future::Future<Output = Result<HttpResponse, PluginError>> + Send {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<HttpResponse, PluginError>> + Send>> {
         let client = self.client.clone();
-        async move {
+        Box::pin(async move {
             let method = match request.method {
                 HttpMethod::Get => reqwest::Method::GET,
                 HttpMethod::Post => reqwest::Method::POST,
@@ -57,16 +58,15 @@ impl HostApi for HostRuntime {
                 .await
                 .map_err(|err| PluginError::Network(err.to_string()))?;
             let status = response.status().as_u16();
-            let headers = response
-                .headers()
-                .iter()
-                .map(|(name, value)| {
-                    (
-                        name.to_string(),
-                        value.to_str().unwrap_or_default().to_string(),
-                    )
-                })
-                .collect::<HashMap<_, _>>();
+            let headers = response.headers().iter().fold(
+                HashMap::<String, Vec<String>>::new(),
+                |mut acc, (name, value)| {
+                    acc.entry(name.as_str().to_ascii_lowercase())
+                        .or_default()
+                        .push(value.to_str().unwrap_or_default().to_string());
+                    acc
+                },
+            );
             let body = response
                 .bytes()
                 .await
@@ -78,7 +78,7 @@ impl HostApi for HostRuntime {
                 headers,
                 body,
             })
-        }
+        })
     }
 
     fn log(&self, _level: LogLevel, _message: &str) {}
