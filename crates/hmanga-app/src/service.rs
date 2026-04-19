@@ -8,7 +8,7 @@ use std::time::Duration;
 use base64::Engine;
 use hmanga_core::{
     download::ExportRunner, AppConfig, Comic, DynPlugin, HostApi, HttpMethod, HttpRequest,
-    HttpResponse, SiteConfig,
+    HttpResponse, NiuhuanCompat, SiteConfig,
 };
 use hmanga_host::HostRuntime;
 use hmanga_plugin_jm::{JmPlugin, JmUserProfile, JmWeeklyInfo, ProcessedImage};
@@ -146,7 +146,11 @@ impl AppServices {
         search_aggregate_plugins(&plugins, &host, &enabled_plugins, query, 1).await
     }
 
-    pub async fn search_aggregate_page(&self, query: &str, page: u32) -> Result<SearchPage, String> {
+    pub async fn search_aggregate_page(
+        &self,
+        query: &str,
+        page: u32,
+    ) -> Result<SearchPage, String> {
         let enabled_plugins = self.config().enabled_plugins;
         let plugins = self.plugins.lock().unwrap().clone();
         let host = self.host();
@@ -517,6 +521,14 @@ impl AppServices {
         )
         .map_err(|err| err.to_string())?;
 
+        if let Some(strict) = NiuhuanCompat::from_comic(comic) {
+            fs::write(
+                comic_dir.join("元数据.json"),
+                serde_json::to_string_pretty(&strict).map_err(|err| err.to_string())?,
+            )
+            .map_err(|err| err.to_string())?;
+        }
+
         if config.chapter_download_interval_sec > 0 {
             sleep(Duration::from_secs(config.chapter_download_interval_sec)).await;
         }
@@ -661,15 +673,21 @@ impl AppServices {
             if !comic_dir.is_dir() {
                 continue;
             }
-            let metadata_path = comic_dir.join("metadata.json");
-            if !metadata_path.exists() {
-                continue;
-            }
+            let (comic, metadata_path, needs_write) = match read_comic_metadata(&comic_dir) {
+                Ok((c, p, w)) => (c, p, w),
+                Err(_) => continue,
+            };
 
-            let comic = serde_json::from_str::<Comic>(
-                &fs::read_to_string(&metadata_path).map_err(|err| err.to_string())?,
-            )
-            .map_err(|err| err.to_string())?;
+            // If we read from 元数据.json, generate metadata.json for faster future reads
+            if needs_write {
+                let new_metadata_path = comic_dir.join("metadata.json");
+                if !new_metadata_path.exists() {
+                    let _ = fs::write(
+                        &new_metadata_path,
+                        serde_json::to_string_pretty(&comic).unwrap_or_default(),
+                    );
+                }
+            }
 
             let mut chapters = Vec::new();
             for chapter in &comic.chapters {
@@ -1207,6 +1225,43 @@ fn collect_named_files(
     Ok(())
 }
 
+/// Reads comic metadata, trying files in order of preference:
+/// 1. metadata.json (full Hmanga format)
+/// 2. 元数据.json - tried as LegacyComicMetadata first (camelCase, old Hmanga format),
+///    then as NiuhuanCompat (Yeats33/jmcomic-downloader compatible, snake_case)
+///
+/// Returns (comic, metadata_path, needs_write_metadata_json)
+/// where `needs_write_metadata_json` is true if only 元数据.json existed and metadata.json should be generated
+fn read_comic_metadata(comic_dir: &Path) -> Result<(Comic, PathBuf, bool), String> {
+    // Try metadata.json first (full Hmanga format)
+    let metadata_path = comic_dir.join("metadata.json");
+    if metadata_path.exists() {
+        let comic: Comic = serde_json::from_str(
+            &fs::read_to_string(&metadata_path).map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+        return Ok((comic, metadata_path, false));
+    }
+
+    // Fall back to 元数据.json
+    let booker_path = comic_dir.join("元数据.json");
+    if booker_path.exists() {
+        let content = fs::read_to_string(&booker_path).map_err(|err| err.to_string())?;
+
+        // First try LegacyComicMetadata (old Hmanga format with camelCase chapterInfos)
+        if let Ok(legacy) = serde_json::from_str::<LegacyComicMetadata>(&content) {
+            return Ok((legacy.to_comic(), booker_path, true));
+        }
+
+        // Then try NiuhuanCompat (Yeats33/jmcomic-downloader compatible format)
+        if let Ok(strict) = serde_json::from_str::<NiuhuanCompat>(&content) {
+            return Ok((strict.to_comic(), booker_path, true));
+        }
+    }
+
+    Err("no metadata file found".to_string())
+}
+
 fn collect_legacy_chapter_metadata(comic_dir: &Path) -> Result<HashMap<i64, PathBuf>, String> {
     let mut metadata_files = Vec::new();
     collect_named_files(comic_dir, "章节元数据.json", &mut metadata_files)?;
@@ -1260,6 +1315,7 @@ impl LegacyComicMetadata {
                 })
                 .collect(),
             extra: HashMap::new(),
+            ..Default::default()
         }
     }
 }
@@ -1325,6 +1381,7 @@ mod tests {
                         tags: Vec::new(),
                         chapters: Vec::new(),
                         extra: HashMap::new(),
+                        ..Default::default()
                     })
                     .collect(),
             }
@@ -1713,6 +1770,7 @@ mod tests {
                 page_count: None,
             }],
             extra: HashMap::new(),
+            ..Default::default()
         };
         let chapter = comic.chapters[0].clone();
         let root = PathBuf::from("/tmp/books");

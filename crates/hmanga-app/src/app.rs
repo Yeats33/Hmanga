@@ -3,8 +3,8 @@ use std::rc::Rc;
 
 use crate::service::{to_browser_src, AppServices, LocalChapterEntry};
 use crate::state::{
-    BrowseTab, CollectionViewMode, DownloadPanelTab, DownloadRow, DownloadRowState, ReaderState,
-    SiteTab, UiState, WorkspaceTab,
+    BrowseTab, CollectionViewMode, DownloadPanelTab, DownloadRow, DownloadRowState, LayoutMode,
+    NavLevel, ReaderState, SiteTab, UiState, WorkspaceTab,
 };
 
 #[component]
@@ -128,6 +128,18 @@ pub fn App() -> Element {
         )
     };
 
+    let layout_mode = ui.read().layout_mode;
+    let layout_toggle_bg = if layout_mode == LayoutMode::ThreeColumn {
+        "#2c7155"
+    } else {
+        "#1f4d3b"
+    };
+    let layout_toggle_text = if layout_mode == LayoutMode::ThreeColumn {
+        "三列"
+    } else {
+        "堆叠"
+    };
+
     rsx! {
         div {
             style: "position:relative; display:flex; min-height:100vh; background:radial-gradient(circle at top left, rgba(242, 193, 132, 0.18), transparent 28%), radial-gradient(circle at top right, rgba(33, 79, 63, 0.14), transparent 24%), linear-gradient(180deg,#f6f0e5 0%,#efe8db 52%,#e8dfd1 100%); color:#1c1c16; font-family:'SF Pro Display','PingFang SC','Microsoft YaHei',sans-serif;",
@@ -202,6 +214,19 @@ pub fn App() -> Element {
                         span {
                             style: "font-size:12px; color:#7b705f;",
                             "搜索 {search_result_count} · 队列 {downloads.len()} · 书架 {library_count}"
+                        }
+                        button {
+                            style: "padding:6px 12px; border:none; border-radius:999px; background:{layout_toggle_bg}; color:white; font-size:12px; font-weight:700; cursor:pointer;",
+                            onclick: move |_| {
+                                let mut ui_handle = ui;
+                                ui_handle.with_mut(|state| {
+                                    state.layout_mode = match state.layout_mode {
+                                        LayoutMode::ThreeColumn => LayoutMode::Stacked,
+                                        LayoutMode::Stacked => LayoutMode::ThreeColumn,
+                                    };
+                                });
+                            },
+                            "{layout_toggle_text}"
                         }
                     }
                 }
@@ -679,8 +704,9 @@ pub fn App() -> Element {
                         }
                     }
 
-                    div {
-                        style: "flex:1; display:flex; gap:16px; min-height:0; padding:16px 20px 20px 20px;",
+                    if layout_mode == LayoutMode::ThreeColumn {
+                        div {
+                            style: "flex:1; display:flex; gap:16px; min-height:0; padding:16px 20px 20px 20px;",
 
                         div {
                             style: "flex:1; display:flex; min-height:0; gap:16px;",
@@ -957,6 +983,25 @@ pub fn App() -> Element {
                             }
                         }
                     }
+                    } else {
+                        {stacked_layout_view(
+                            ui,
+                            services,
+                            browse_tab,
+                            browse_view_mode,
+                            search_results.clone(),
+                            selected_comic.clone(),
+                            downloads.clone(),
+                            library.clone(),
+                            reader.clone(),
+                            reader_summary.clone(),
+                            active_download_count,
+                            completed_download_count,
+                            has_more_pages,
+                            search_result_count,
+                            loading,
+                        )}
+                    }
                 } else if workspace_tab == WorkspaceTab::Library {
                     div {
                         style: "flex:1; display:flex; gap:16px; min-height:0; padding:16px 20px 20px 20px;",
@@ -1064,6 +1109,9 @@ pub fn App() -> Element {
                                                     current_index: 0,
                                                     source_dir: Some(chapter.chapter_dir.clone()),
                                                 });
+                                                if state.layout_mode == LayoutMode::Stacked {
+                                                    state.push_nav(NavLevel::ChapterReader);
+                                                }
                                                 state.status = format!("打开阅读器：{}", state.reader.title);
                                             });
                                         }
@@ -1113,6 +1161,9 @@ pub fn App() -> Element {
                                                         current_index: 0,
                                                         source_dir: Some(chapter.chapter_dir.clone()),
                                                     });
+                                                    if state.layout_mode == LayoutMode::Stacked {
+                                                        state.push_nav(NavLevel::ChapterReader);
+                                                    }
                                                     state.status = format!("打开阅读器：{}", state.reader.title);
                                                 });
                                             }
@@ -2104,6 +2155,9 @@ fn download_chapter_row(
                                 current_index: 0,
                                 source_dir: Some(local_chapter.chapter_dir.clone()),
                             });
+                            if state.layout_mode == LayoutMode::Stacked {
+                                state.push_nav(NavLevel::ChapterReader);
+                            }
                             state.status = format!("打开阅读器：{}", state.reader.title);
                         });
                     },
@@ -2154,6 +2208,9 @@ fn download_chapter_row(
                                         current_index: 0,
                                         source_dir: None,
                                     });
+                                    if state.layout_mode == LayoutMode::Stacked {
+                                        state.push_nav(NavLevel::ChapterReader);
+                                    }
                                     state.status = format!("已载入在线阅读：{}", chapter.title);
                                 }
                                 Err(err) => state.status = err,
@@ -2238,6 +2295,9 @@ fn download_chapter_row(
                                         current_index: 0,
                                         source_dir: Some(local_chapter.chapter_dir.clone()),
                                     });
+                                    if state.layout_mode == LayoutMode::Stacked {
+                                        state.push_nav(NavLevel::ChapterReader);
+                                    }
                                     format!("{} 下载完成。", chapter.title)
                                 }
                                 Err(err) => err,
@@ -2345,6 +2405,9 @@ fn download_queue_row(
                                 current_index: 0,
                                 source_dir: Some(local_chapter.chapter_dir.clone()),
                             });
+                            if state.layout_mode == LayoutMode::Stacked {
+                                state.push_nav(NavLevel::ChapterReader);
+                            }
                             state.status = format!("打开阅读器：{}", state.reader.title);
                         });
                     },
@@ -2480,6 +2543,280 @@ fn services_cancel(services: &AppServices, chapter_id: &str, ui: &mut Signal<UiS
             row.detail = "已请求取消".to_string();
         }
     });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stacked_layout_view(
+    ui: Signal<UiState>,
+    services: Signal<AppServices>,
+    browse_tab: BrowseTab,
+    browse_view_mode: CollectionViewMode,
+    search_results: Vec<hmanga_core::Comic>,
+    selected_comic: Option<hmanga_core::Comic>,
+    _downloads: Vec<DownloadRow>,
+    library: Vec<crate::service::LocalComicEntry>,
+    reader: ReaderState,
+    _reader_summary: String,
+    _active_download_count: usize,
+    _completed_download_count: usize,
+    has_more_pages: bool,
+    search_result_count: usize,
+    loading: bool,
+) -> Element {
+    let current_nav = ui.read().current_nav();
+    let can_pop = ui.read().can_pop();
+    let nav_title = match current_nav {
+        NavLevel::BrowseList => "浏览结果",
+        NavLevel::ComicDetail => selected_comic
+            .as_ref()
+            .map(|c| c.title.as_str())
+            .unwrap_or("漫画详情"),
+        NavLevel::ChapterReader => "阅读",
+    };
+
+    rsx! {
+        div {
+            style: "flex:1; display:flex; flex-direction:column; min-height:0; padding:16px 20px 20px 20px;",
+            div { style: "display:flex; align-items:center; gap:12px; margin-bottom:16px;",
+                if can_pop {
+                    button {
+                        style: "padding:8px 14px; border:none; border-radius:12px; background:#6b5b3d; color:white; font-weight:700; cursor:pointer;",
+                        onclick: move |_| {
+                            let mut ui_handle = ui;
+                            ui_handle.with_mut(|state| {
+                                state.pop_nav();
+                            });
+                        },
+                        "← 返回"
+                    }
+                }
+                div { style: "flex:1; font-size:20px; font-weight:900; color:#4a3f32;", "{nav_title}" }
+            }
+            div { style: "flex:1; overflow:auto; border-radius:24px; background:rgba(255,251,246,0.86); border:1px solid rgba(124,92,49,0.1); box-shadow:0 16px 34px rgba(65,44,18,0.05);",
+                if current_nav == NavLevel::BrowseList {
+                    div { style: "padding:18px 20px;",
+                        div { style: "display:flex; align-items:flex-end; justify-content:space-between; gap:12px; margin-bottom:16px;",
+                            {section_heading("Discover", "浏览结果", format!("{search_result_count} 项"))}
+                            div { style: "display:flex; gap:8px; flex-wrap:wrap;",
+                                {view_mode_button(browse_view_mode == CollectionViewMode::List, "列表", {
+                                    let ui_handle = ui;
+                                    move |_| {
+                                        let mut ui_handle = ui_handle;
+                                        ui_handle.with_mut(|state| state.set_browse_view_mode(CollectionViewMode::List));
+                                    }
+                                })}
+                                {view_mode_button(browse_view_mode == CollectionViewMode::Image, "图片", {
+                                    let ui_handle = ui;
+                                    move |_| {
+                                        let mut ui_handle = ui_handle;
+                                        ui_handle.with_mut(|state| state.set_browse_view_mode(CollectionViewMode::Image));
+                                    }
+                                })}
+                                {view_mode_button(browse_view_mode == CollectionViewMode::SingleColumn, "单列", {
+                                    let ui_handle = ui;
+                                    move |_| {
+                                        let mut ui_handle = ui_handle;
+                                        ui_handle.with_mut(|state| state.set_browse_view_mode(CollectionViewMode::SingleColumn));
+                                    }
+                                })}
+                            }
+                        }
+                        if search_results.is_empty() {
+                            {empty_block("还没有搜索结果")}
+                        } else if browse_view_mode == CollectionViewMode::List {
+                            for comic in search_results {
+                                {comic_row(comic, Rc::new(move |comic_id, comic_source| {
+                                    let services = services.read().clone();
+                                    let mut ui_handle = ui;
+                                    spawn(async move {
+                                        ui_handle.with_mut(|state| state.status = "加载漫画详情...".to_string());
+                                        match services.load_comic(&comic_source, &comic_id).await {
+                                            Ok(comic) => ui_handle.with_mut(|state| {
+                                                state.selected_comic = Some(comic);
+                                                state.push_nav(NavLevel::ComicDetail);
+                                                state.status = "漫画详情已加载。".to_string();
+                                            }),
+                                            Err(err) => ui_handle.with_mut(|state| state.status = err),
+                                        }
+                                    });
+                                }))}
+                            }
+                        } else if browse_view_mode == CollectionViewMode::Image {
+                            div { style: "display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:14px;",
+                                for comic in search_results {
+                                    {comic_image_card(comic, Rc::new(move |comic_id, comic_source| {
+                                        let services = services.read().clone();
+                                        let mut ui_handle = ui;
+                                        spawn(async move {
+                                            ui_handle.with_mut(|state| state.status = "加载漫画详情...".to_string());
+                                            match services.load_comic(&comic_source, &comic_id).await {
+                                                Ok(comic) => ui_handle.with_mut(|state| {
+                                                    state.selected_comic = Some(comic);
+                                                    state.push_nav(NavLevel::ComicDetail);
+                                                    state.status = "漫画详情已加载。".to_string();
+                                                }),
+                                                Err(err) => ui_handle.with_mut(|state| state.status = err),
+                                            }
+                                        });
+                                    }))}
+                                }
+                            }
+                        } else {
+                            for comic in search_results {
+                                {comic_single_column_card(comic, Rc::new(move |comic_id, comic_source| {
+                                    let services = services.read().clone();
+                                    let mut ui_handle = ui;
+                                    spawn(async move {
+                                        ui_handle.with_mut(|state| state.status = "加载漫画详情...".to_string());
+                                        match services.load_comic(&comic_source, &comic_id).await {
+                                            Ok(comic) => ui_handle.with_mut(|state| {
+                                                state.selected_comic = Some(comic);
+                                                state.push_nav(NavLevel::ComicDetail);
+                                                state.status = "漫画详情已加载。".to_string();
+                                            }),
+                                            Err(err) => ui_handle.with_mut(|state| state.status = err),
+                                        }
+                                    });
+                                }))}
+                            }
+                        }
+                        if browse_tab == BrowseTab::Search && has_more_pages && search_result_count > 0 {
+                            div { style: "text-align:center; padding:16px;",
+                                button {
+                                    style: "padding:10px 24px; border:none; border-radius:12px; background:#1f4d3b; color:white; font-weight:800; cursor:pointer;",
+                                    disabled: loading,
+                                    onclick: move |_| {
+                                        let services = services.read().clone();
+                                        let mut ui_handle = ui;
+                                        let query = ui_handle.read().search_query_text.clone();
+                                        let current_page = ui_handle.read().search_current_page;
+                                        let site = ui_handle.read().site_tab;
+                                        ui_handle.with_mut(|state| {
+                                            state.loading = true;
+                                            state.status = format!("加载第 {} 页...", current_page + 1);
+                                        });
+                                        spawn(async move {
+                                            let result = match site {
+                                                SiteTab::Aggregate => services.search_aggregate_page(&query, current_page + 1).await,
+                                                SiteTab::Jm => services.search_jm_page(&query, current_page + 1).await,
+                                                SiteTab::Wnacg => services.search_wnacg_page(&query, current_page + 1).await,
+                                            };
+                                            ui_handle.with_mut(|state| {
+                                                state.loading = false;
+                                                match result {
+                                                    Ok(page) => {
+                                                        state.search_results.extend(page.comics);
+                                                        state.search_current_page = page.current_page;
+                                                        state.search_total_pages = page.total_pages;
+                                                        if page.current_page < page.total_pages {
+                                                            state.status = format!("第 {} / {} 页，继续滚动加载更多...", page.current_page, page.total_pages);
+                                                        } else {
+                                                            state.status = format!("已加载全部 {} 页，共 {} 部漫画。", page.total_pages, state.search_results.len());
+                                                        }
+                                                    }
+                                                    Err(err) => state.status = err,
+                                                }
+                                            });
+                                        });
+                                    },
+                                    if loading { "加载中..." } else { "加载更多" }
+                                }
+                            }
+                        }
+                    }
+                } else if current_nav == NavLevel::ComicDetail {
+                    div { style: "padding:18px 20px;",
+                        if let Some(comic) = selected_comic {
+                            div { style: "display:flex; flex-direction:column; gap:14px;",
+                                div { style: "padding:16px; border-radius:16px; background:white; border:1px solid #ebe4d8; box-shadow:0 8px 24px rgba(60,40,10,0.04);",
+                                    div { style: "display:flex; gap:16px; align-items:flex-start;",
+                                        if !comic.cover_url.is_empty() {
+                                            img {
+                                                style: "width:112px; min-width:112px; aspect-ratio:3/4; object-fit:cover; border-radius:14px; border:1px solid #e9e0d2; background:#f6f1e8;",
+                                                src: "{comic.cover_url}"
+                                            }
+                                        }
+                                        div { style: "flex:1; min-width:0; display:flex; flex-direction:column; gap:8px;",
+                                            h3 { style: "margin:0; font-size:22px; line-height:1.3;", "{comic.title}" }
+                                            div { style: "display:flex; gap:8px; flex-wrap:wrap;",
+                                                span { style: "display:inline-flex; align-items:center; gap:6px; padding:5px 9px; border-radius:999px; background:#f6f1e8; color:#6a5f4e; font-size:12px;", strong { style: "font-weight:800;", "来源" } span { "{comic.source.to_uppercase()}" } }
+                                                span { style: "display:inline-flex; align-items:center; gap:6px; padding:5px 9px; border-radius:999px; background:#f6f1e8; color:#6a5f4e; font-size:12px;", strong { style: "font-weight:800;", "作者" } span { "{comic.author}" } }
+                                                span { style: "display:inline-flex; align-items:center; gap:6px; padding:5px 9px; border-radius:999px; background:#f6f1e8; color:#6a5f4e; font-size:12px;", strong { style: "font-weight:800;", "章节" } span { "{comic.chapters.len()}" } }
+                                            }
+                                            if !comic.description.is_empty() {
+                                                p { style: "margin:0; color:#665f52; line-height:1.6;", "{comic.description}" }
+                                            }
+                                        }
+                                    }
+                                }
+                                div { style: "display:flex; flex-direction:column; gap:10px;",
+                                    for chapter in comic.chapters.clone() {
+                                        {download_chapter_row(comic.clone(), chapter, library.clone(), services.read().clone(), ui)}
+                                    }
+                                }
+                            }
+                        } else {
+                            {empty_block("先从左侧选择一部漫画。")}
+                        }
+                    }
+                } else if current_nav == NavLevel::ChapterReader {
+                    div { style: "height:100%; display:flex; flex-direction:column;",
+                        div { style: "flex:1; overflow:auto; padding:14px;",
+                            if reader.pages.is_empty() {
+                                {empty_block("等待打开章节")}
+                            } else {
+                                div { style: "display:flex; flex-direction:column; align-items:center; gap:16px;",
+                                    if let Some(page_url) = reader.pages.get(reader.current_index) {
+                                        img {
+                                            style: "max-width:100%; border-radius:12px;",
+                                            src: "{page_url}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div { style: "display:flex; justify-content:center; gap:16px; padding:16px; border-top:1px solid #e0d8cc;",
+                            button {
+                                style: "padding:10px 20px; border:none; border-radius:12px; background:#6b5b3d; color:white; font-weight:700; cursor:pointer;",
+                                disabled: reader.current_index == 0,
+                                onclick: move |_| {
+                                    let mut ui_handle = ui;
+                                    ui_handle.with_mut(|state| {
+                                        if state.reader.current_index > 0 {
+                                            state.reader.current_index -= 1;
+                                        }
+                                    });
+                                },
+                                "上一页"
+                            }
+                            button {
+                                style: "padding:8px 16px; border:none; border-radius:12px; background:#1f4d3b; color:white; font-weight:700; cursor:pointer;",
+                                onclick: move |_| {
+                                    let mut ui_handle = ui;
+                                    ui_handle.with_mut(|state| state.open_reader_fullscreen());
+                                },
+                                "最大化"
+                            }
+                            span { style: "display:flex; align-items:center; font-size:14px; color:#6a5f4e;", "第 {reader.current_index + 1} / {reader.pages.len()} 页" }
+                            button {
+                                style: "padding:10px 20px; border:none; border-radius:12px; background:#6b5b3d; color:white; font-weight:700; cursor:pointer;",
+                                disabled: reader.current_index >= reader.pages.len().saturating_sub(1),
+                                onclick: move |_| {
+                                    let mut ui_handle = ui;
+                                    ui_handle.with_mut(|state| {
+                                        if state.reader.current_index < state.reader.pages.len().saturating_sub(1) {
+                                            state.reader.current_index += 1;
+                                        }
+                                    });
+                                },
+                                "下一页"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn reader_panel(

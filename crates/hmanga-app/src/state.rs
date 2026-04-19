@@ -41,6 +41,21 @@ pub enum BrowseTab {
     Weekly,
 }
 
+// Navigation levels for stacked layout
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavLevel {
+    BrowseList,
+    ComicDetail,
+    ChapterReader,
+}
+
+// Layout mode selection
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayoutMode {
+    ThreeColumn,
+    Stacked,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CollectionViewMode {
     List,
@@ -131,6 +146,8 @@ pub struct UiState {
     pub library_sort: LibrarySort,
     pub reader: ReaderState,
     pub reader_fullscreen: bool,
+    pub layout_mode: LayoutMode,
+    pub nav_stack: Vec<NavLevel>,
 }
 
 impl Default for UiState {
@@ -168,6 +185,8 @@ impl Default for UiState {
             library_sort: LibrarySort::DownloadDate,
             reader: ReaderState::default(),
             reader_fullscreen: false,
+            layout_mode: LayoutMode::ThreeColumn,
+            nav_stack: vec![NavLevel::BrowseList],
         }
     }
 }
@@ -196,6 +215,27 @@ impl UiState {
 
     pub fn open_reader_fullscreen(&mut self) {
         self.reader_fullscreen = true;
+    }
+
+    pub fn current_nav(&self) -> NavLevel {
+        self.nav_stack
+            .last()
+            .copied()
+            .unwrap_or(NavLevel::BrowseList)
+    }
+
+    pub fn push_nav(&mut self, level: NavLevel) {
+        self.nav_stack.push(level);
+    }
+
+    pub fn pop_nav(&mut self) {
+        if self.nav_stack.len() > 1 {
+            self.nav_stack.pop();
+        }
+    }
+
+    pub fn can_pop(&self) -> bool {
+        self.nav_stack.len() > 1
     }
 }
 

@@ -451,11 +451,16 @@ impl JmPlugin {
             title: comic.name,
             author: comic.author,
             // Use comic_id to generate cover URL, same as map_comic
-            cover_url: comic.id.parse::<i64>().map(|id| self.normalize_cover_url(None, Some(id))).unwrap_or_default(),
+            cover_url: comic
+                .id
+                .parse::<i64>()
+                .map(|id| self.normalize_cover_url(None, Some(id)))
+                .unwrap_or_default(),
             description: String::new(),
             tags,
             chapters: Vec::new(),
             extra,
+            ..Default::default()
         }
     }
 
@@ -502,6 +507,7 @@ impl JmPlugin {
             tags,
             chapters,
             extra,
+            ..Default::default()
         }
     }
 
@@ -588,6 +594,7 @@ impl JmPlugin {
             tags,
             chapters: Vec::new(),
             extra,
+            ..Default::default()
         }
     }
 
@@ -615,6 +622,7 @@ impl JmPlugin {
             tags,
             chapters: Vec::new(),
             extra,
+            ..Default::default()
         }
     }
 
@@ -978,7 +986,6 @@ struct ComicInSearchRespData {
     id: String,
     author: String,
     name: String,
-    image: String,
     category: CategoryRespData,
     #[serde(rename = "category_sub")]
     category_sub: CategorySubRespData,

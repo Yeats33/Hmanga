@@ -57,6 +57,7 @@ fn download_history_roundtrips_with_pending_task() {
             page_count: Some(1),
         }],
         extra: HashMap::new(),
+        ..Default::default()
     };
     let task = DownloadTask {
         id: 1,

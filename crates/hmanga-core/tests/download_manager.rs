@@ -48,6 +48,7 @@ async fn emits_progress_and_completion_events_for_single_chapter_download() {
         tags: vec![],
         chapters: vec![],
         extra: Default::default(),
+        ..Default::default()
     };
     let chapter = ChapterInfo {
         id: "ch1".to_string(),
